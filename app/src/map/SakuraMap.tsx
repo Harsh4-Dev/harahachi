@@ -141,13 +141,11 @@ function Grove({ x, y, seed, n = 7 }: { x: number; y: number; seed: number; n?: 
 function Mountain({ x, y, s = 1, snow = false }: { x: number; y: number; s?: number; snow?: boolean }) {
   return (
     <g transform={`translate(${x} ${y}) scale(${s})`}>
-      {/* ink-painted peak per the reference: dark slate body, deeper shaded
-          left face, washi ridge highlights raking down the right */}
-      <path d="M -46 26 L -8 -44 Q -4 -50 0 -44 L 38 26 Q 0 34 -46 26 Z" fill="#5C6E80" stroke="#3E4C5C" strokeWidth={1.2} />
-      <path d="M -8 -44 L -46 26 Q -22 30 -4 28 L -6 -40 Z" fill="#435363" opacity={0.9} />
-      <path d="M -3 -40 L 6 -18 M -2 -30 L 12 -2 M 0 -18 L 18 12" stroke="#8DA0AF" strokeWidth={1.2} fill="none" opacity={0.7} strokeLinecap="round" />
-      <path d="M -10 -30 L -20 -6 M -12 -18 L -26 12" stroke="#2F3B49" strokeWidth={1} fill="none" opacity={0.5} strokeLinecap="round" />
-      {snow && <path d="M -14 -32 L -8 -44 Q -4 -50 0 -44 L 6 -33 Q 0 -27 -6 -31 Q -10 -27 -14 -32 Z" fill="var(--washi)" stroke="#3E4C5C" strokeWidth={0.8} strokeOpacity={0.6} />}
+      {/* washi-toned peak (original palette), shaded left face + ink ridgeline */}
+      <path d="M -46 26 L -8 -44 Q -4 -50 0 -44 L 38 26 Q 0 34 -46 26 Z" fill="var(--washi-deep)" stroke="var(--sumi)" strokeWidth={1.4} strokeOpacity={0.55} />
+      <path d="M -8 -44 L -46 26 Q -22 30 -4 28 L -6 -40 Z" fill="var(--sumi)" opacity={0.14} />
+      <path d="M -6 -38 L -12 -20 M -5 -28 L -14 -4 M -4 -16 L -16 8" stroke="var(--sumi)" strokeWidth={1} fill="none" opacity={0.3} />
+      {snow && <path d="M -14 -32 L -8 -44 Q -4 -50 0 -44 L 6 -33 Q 0 -27 -6 -31 Q -10 -27 -14 -32 Z" fill="var(--washi)" stroke="var(--sumi)" strokeWidth={0.8} strokeOpacity={0.4} />}
     </g>
   );
 }
