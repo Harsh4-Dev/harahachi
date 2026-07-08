@@ -37,7 +37,7 @@
 }
 .numkey {
   padding: 16px 0;
-  border-radius: 14px;
+  border-radius: 12px;
   font-family: var(--font-display);
   font-size: 24px;
   font-weight: 700;
@@ -317,6 +317,71 @@
   font-family: var(--font-display);
   font-size: 14px;
   font-weight: 800;
+  flex: 0 0 auto;
+}
+
+/* Proposed-action confirm card: a glass card with two clearly separated,
+   ≥44px tap targets — a vermillion hanko "stamp" and a quiet ghost "dismiss".
+   Constrained to the bubble wrap so it never renders half-off-screen at 375px. */
+.annai-confirm-chip {
+  align-self: flex-start;
+  width: 100%;
+  max-width: 100%;
+  padding: 12px;
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+.annai-confirm-text {
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--sumi);
+}
+.annai-confirm-actions {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+}
+.annai-confirm-yes,
+.annai-confirm-no {
+  min-height: 44px;
+  border-radius: 12px;
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 14px;
+  transition: transform 120ms ease, box-shadow 120ms ease, filter 120ms ease;
+}
+.annai-confirm-yes {
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 16px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: var(--shu);
+  color: var(--washi);
+  box-shadow: 0 4px 12px rgba(199, 62, 58, 0.32);
+}
+/* The inline hanko reads as an embossed seal on the vermillion fill. */
+.annai-confirm-yes .annai-action-seal {
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  color: var(--washi);
+}
+.annai-confirm-no {
+  flex: 0 0 auto;
+  padding: 0 16px;
+  background: transparent;
+  border: 1px solid var(--sumi-soft);
+  color: var(--sumi-soft);
+  font-weight: 600;
+}
+.annai-confirm-yes:active,
+.annai-confirm-no:active {
+  transform: scale(0.97);
+  box-shadow: inset 0 1px 4px rgba(43, 42, 51, 0.22);
 }
 
 .annai-suggestions {

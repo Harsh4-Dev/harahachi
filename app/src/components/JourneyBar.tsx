@@ -61,7 +61,7 @@ export function JourneyBar({ consumed, target, burned = 0 }: Props) {
           stroke="var(--sakura-deep)"
           strokeWidth={5}
           strokeLinecap="round"
-          style={{ transition: 'stroke-dashoffset 600ms cubic-bezier(.22,.9,.31,1)' }}
+          style={{ transition: 'stroke-dashoffset 500ms ease-out' }}
         />
         {/* overshoot stub past destination */}
         <g style={{ transformOrigin: '300px 30px', transition: 'transform 500ms, opacity 300ms' }} ref={overRef as never}>

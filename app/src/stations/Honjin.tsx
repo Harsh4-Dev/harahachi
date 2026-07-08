@@ -8,6 +8,7 @@ import { MacroPath } from '../components/MacroPath';
 import { WaterRow } from '../components/WaterRow';
 import { StreakChip } from '../components/StreakChip';
 import { NutrientChips } from '../components/NutrientChips';
+import { PetalLoader } from '../components/PetalLoader';
 import { useApp } from '../state/AppContext';
 import { useDay } from '../state/useDay';
 import { fmtInt, fmtTime, todayStr } from '../lib/format';
@@ -110,7 +111,7 @@ export function Honjin() {
 
       <div className="section-label">Today&apos;s meals</div>
       {day.loading ? (
-        <div className="spinner" />
+        <PetalLoader block />
       ) : day.meals.length === 0 ? (
         <div className="empty">No meals yet — visit Chaya 茶屋 to snap your first dish.</div>
       ) : (
@@ -132,7 +133,7 @@ export function Honjin() {
 
       <div className="section-label">From your past travels</div>
       {loadingSug ? (
-        <div className="spinner" />
+        <PetalLoader block />
       ) : suggestions.length === 0 ? (
         <div className="empty">No suggestions right now — you&apos;re on track.</div>
       ) : (

@@ -12,6 +12,7 @@ import { useCamera, type Frame } from './useCamera';
 import { startBarcodeScan, type ScannerHandle } from './barcode';
 import { DishOverlay } from './DishOverlay';
 import { BarcodeCard } from './BarcodeCard';
+import { PetalLoader } from '../components/PetalLoader';
 import { useApp } from '../state/AppContext';
 import { ApiError } from '../api/http';
 import type { AnalyzeResult, BarcodeResult, MealInput } from '../api/types';
@@ -37,6 +38,7 @@ export function Capture({ onClose, onLogged, reducedMotion }: Props) {
 
   // Barcode flow state
   const [product, setProduct] = useState<BarcodeResult | null>(null);
+  const [lookingUp, setLookingUp] = useState(false);
   const scannerRef = useRef<ScannerHandle | null>(null);
   const lookingUpRef = useRef(false);
 
@@ -119,6 +121,7 @@ export function Capture({ onClose, onLogged, reducedMotion }: Props) {
     async (code: string) => {
       if (lookingUpRef.current) return;
       lookingUpRef.current = true;
+      setLookingUp(true);
       scannerRef.current?.stop();
       scannerRef.current = null;
       if ('vibrate' in navigator) navigator.vibrate?.(20);
@@ -128,6 +131,7 @@ export function Capture({ onClose, onLogged, reducedMotion }: Props) {
       } catch (e) {
         const net = e instanceof ApiError && e.status === 0;
         lookingUpRef.current = false;
+        setLookingUp(false);
         // Barcode lookup failure → retry (re-scan) or manual entry.
         showError({
           message: net
@@ -135,6 +139,7 @@ export function Capture({ onClose, onLogged, reducedMotion }: Props) {
             : 'Barcode lookup failed.',
           retry: () => {
             lookingUpRef.current = false;
+            setLookingUp(false);
           },
           secondaryLabel: 'Enter manually',
           onSecondary: onClose,
@@ -159,6 +164,7 @@ export function Capture({ onClose, onLogged, reducedMotion }: Props) {
 
   const resetBarcode = useCallback(() => {
     setProduct(null);
+    setLookingUp(false);
     lookingUpRef.current = false;
   }, []);
 
@@ -211,7 +217,7 @@ export function Capture({ onClose, onLogged, reducedMotion }: Props) {
       </div>
 
       {/* Barcode reticle (only while actively scanning) */}
-      {mode === 'barcode' && !product && !noCamera && (
+      {mode === 'barcode' && !product && !lookingUp && !noCamera && (
         <div className="reticle" aria-hidden>
           <span className="tick tl" />
           <span className="tick tr" />
@@ -219,6 +225,16 @@ export function Capture({ onClose, onLogged, reducedMotion }: Props) {
           <span className="tick br" />
           {!reducedMotion && <span className="scanline" />}
           <div className="reticle-hint glass-ink">Point at a barcode</div>
+        </div>
+      )}
+
+      {/* Barcode lookup in flight — petal loader over the frozen feed */}
+      {mode === 'barcode' && lookingUp && !product && (
+        <div className="capture-center">
+          <div className={`glass-ink capture-shimmer ${reducedMotion ? '' : 'shimmering'}`}>
+            <PetalLoader size={44} />
+            <div>looking up…</div>
+          </div>
         </div>
       )}
 
@@ -246,7 +262,7 @@ export function Capture({ onClose, onLogged, reducedMotion }: Props) {
       {mode === 'dish' && frame && analyzing && (
         <div className="capture-center">
           <div className={`glass-ink capture-shimmer ${reducedMotion ? '' : 'shimmering'}`}>
-            <div className="spinner" />
+            <PetalLoader size={44} />
             <div>reading the dish…</div>
           </div>
         </div>

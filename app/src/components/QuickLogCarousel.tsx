@@ -6,6 +6,7 @@
 import { useEffect, useState } from 'react';
 import { useApp } from '../state/AppContext';
 import { fmtInt } from '../lib/format';
+import { PetalLoader } from './PetalLoader';
 import type { MealInput, RecentMeal } from '../api/types';
 
 interface Props {
@@ -67,7 +68,7 @@ export function QuickLogCarousel({ onLog }: Props) {
     }
   };
 
-  if (loading) return <div className="spinner" />;
+  if (loading) return <PetalLoader block />;
   if (items.length === 0) {
     return <div className="empty">Log a few dishes and they&apos;ll appear here for one-tap re-logging.</div>;
   }

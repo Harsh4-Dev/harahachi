@@ -10,6 +10,7 @@ import { usePrefersReducedMotion } from '../App';
 import { computeTargets, computeEtaDate } from '../lib/targets';
 import { getGlassAlpha, isPushEnabled, setGlassAlpha, setPushEnabled } from '../api/storage';
 import { fmtInt } from '../lib/format';
+import { PetalLoader } from '../components/PetalLoader';
 import { BodyPicker } from '../body/BodyPicker';
 import { BodyPhotoCapture } from '../body/BodyPhotoCapture';
 import { KeeperCard } from '../keeper/Keeper';
@@ -157,7 +158,7 @@ export function Tegata() {
           </button>
         </div>
       ) : (
-        <div className="empty">Loading permit…</div>
+        <PetalLoader block caption="Loading permit…" />
       )}
 
       {/* Body composition (editable body-fat diagram + photo path) */}

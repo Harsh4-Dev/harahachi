@@ -4,6 +4,7 @@
 // /insights?week=.
 
 import { fmtInt } from '../lib/format';
+import { PetalLoader } from './PetalLoader';
 import type { InsightsResponse } from '../api/types';
 
 interface Props {
@@ -24,7 +25,7 @@ export function InsightsCard({ insights, loading }: Props) {
   if (loading) {
     return (
       <div className="card glass insights-scroll">
-        <div className="spinner" />
+        <PetalLoader block />
       </div>
     );
   }

@@ -199,14 +199,33 @@ function Forest({ x, y, n, seed, spread = 46 }: { x: number; y: number; n: numbe
 function Pagoda({ x, y, s = 1, tiers = 2 }: { x: number; y: number; s?: number; tiers?: number }) {
   return (
     <g transform={`translate(${x} ${y}) scale(${s})`}>
-      <rect x={-8} y={-6} width={16} height={6} fill="var(--washi)" stroke="var(--sumi)" strokeWidth={1} strokeOpacity={0.6} />
+      {/* stone plinth + ground shadow */}
+      <ellipse cx={0} cy={1.5} rx={12} ry={2.4} fill="var(--sumi)" opacity={0.12} />
+      <rect x={-10} y={-1.5} width={20} height={2.6} rx={0.8} fill="var(--washi-deep)" stroke="var(--sumi)" strokeWidth={0.7} strokeOpacity={0.5} />
+      {/* main hall wall with door + beam lines */}
+      <rect x={-8} y={-8} width={16} height={7} fill="var(--washi)" stroke="var(--sumi)" strokeWidth={1} strokeOpacity={0.65} />
+      <rect x={-1.8} y={-6} width={3.6} height={5} fill="var(--sumi)" opacity={0.55} />
+      <path d="M -8 -5.8 H 8 M -5 -8 V -1.5 M 5 -8 V -1.5" stroke="var(--sumi)" strokeWidth={0.6} opacity={0.35} />
       {Array.from({ length: tiers }, (_, i) => (
-        <g key={i} transform={`translate(0 ${-6 - i * 9})`}>
-          {i > 0 && <rect x={-6 + i} y={-3} width={12 - i * 2} height={4} fill="var(--washi)" stroke="var(--sumi)" strokeWidth={0.8} strokeOpacity={0.6} />}
-          <path d={`M ${-14 + i * 2} 0 Q ${-15 + i * 2} -3 ${-12 + i * 2} -3 Q 0 -9 ${12 - i * 2} -3 Q ${15 - i * 2} -3 ${14 - i * 2} 0 Q 0 -4 ${-14 + i * 2} 0 Z`} fill="var(--ai)" stroke="var(--sumi)" strokeWidth={0.9} strokeOpacity={0.5} />
+        <g key={i} transform={`translate(0 ${-8 - i * 9})`}>
+          {i > 0 && (
+            <>
+              <rect x={-6 + i} y={-4} width={12 - i * 2} height={5} fill="var(--washi)" stroke="var(--sumi)" strokeWidth={0.8} strokeOpacity={0.6} />
+              <rect x={-1.2} y={-3} width={2.4} height={3} fill="var(--sumi)" opacity={0.4} />
+            </>
+          )}
+          {/* vermillion roof with sweeping upturned eaves + eave shadow */}
+          <path
+            d={`M ${-15 + i * 2} 0 Q ${-17 + i * 2} -1.5 ${-13 + i * 2} -4 Q 0 -10.5 ${13 - i * 2} -4 Q ${17 - i * 2} -1.5 ${15 - i * 2} 0 Q 0 -4.5 ${-15 + i * 2} 0 Z`}
+            fill="var(--shu)" stroke="var(--sumi)" strokeWidth={0.9} strokeOpacity={0.55}
+          />
+          <path d={`M ${-13 + i * 2} -3.4 Q 0 -9.5 ${13 - i * 2} -3.4`} fill="none" stroke="var(--ai)" strokeWidth={1.6} opacity={0.75} />
+          <path d={`M ${-14 + i * 2} -0.4 Q 0 -4.6 ${14 - i * 2} -0.4`} fill="none" stroke="var(--sumi)" strokeWidth={0.7} opacity={0.3} />
         </g>
       ))}
-      <line x1={0} y1={-6 - (tiers - 1) * 9 - 8} x2={0} y2={-6 - (tiers - 1) * 9 - 12} stroke="var(--shu)" strokeWidth={1.6} />
+      {/* ridge finial (sōrin) */}
+      <line x1={0} y1={-8 - (tiers - 1) * 9 - 9} x2={0} y2={-8 - (tiers - 1) * 9 - 14} stroke="var(--kin)" strokeWidth={1.6} />
+      <circle cx={0} cy={-8 - (tiers - 1) * 9 - 15} r={1.4} fill="var(--kin)" />
     </g>
   );
 }
@@ -330,6 +349,8 @@ function Seal({ st, active, onSelect }: { st: Station; active: boolean; onSelect
     >
       {/* generous invisible tap target */}
       <circle r={40} fill="transparent" />
+      {/* ring-pulse fired when this seal becomes the active one */}
+      {active && <circle className="seal-pulse" r={26} />}
       <circle r={26} fill={active ? 'var(--shu)' : 'var(--washi)'} stroke="var(--shu)" strokeWidth={4} />
       <text
         y={1}
@@ -509,11 +530,35 @@ function SakuraMapImpl({ active, travelerT, onSelect, reducedMotion }: Props) {
         <Ridge x={430} y={430} n={3} rot={-8} />
         <Ridge x={620} y={560} n={3} rot={-14} />
 
-        {/* Rivers running from the highlands to the coast */}
-        <path
-          d="M 545 350 C 520 420, 560 470, 520 540 C 480 610, 500 700, 450 760 C 420 800, 440 840, 430 878"
-          fill="none" stroke="var(--ai)" strokeWidth={2.2} opacity={0.45} strokeLinecap="round"
-        />
+        {/* River → sea. Springs quietly from the northern highlands (no
+            waterfall/cliff/pool), then widens downstream (layered strokes: dark
+            bed, mid water, light current), fords at Koyomi, and opens into a
+            fanned delta at the south coast. */}
+        <g pointerEvents="none">
+          {/* river: bed, water, current highlight — springs from the highlands,
+              widening downstream */}
+          <path
+            d="M 545 356 C 520 420, 560 470, 520 540 C 480 610, 500 700, 450 760 C 420 800, 440 840, 430 872"
+            fill="none" stroke="#4A6E86" strokeWidth={9} strokeLinecap="round" opacity={0.9}
+          />
+          <path
+            d="M 545 356 C 520 420, 560 470, 520 540 C 480 610, 500 700, 450 760 C 420 800, 440 840, 430 872"
+            fill="none" stroke="#7FA9BA" strokeWidth={5.5} strokeLinecap="round"
+          />
+          <path
+            d="M 545 358 C 521 420, 559 470, 520 540 C 481 610, 499 700, 450 760 C 421 800, 439 840, 430 870"
+            fill="none" stroke="#A9CAD4" strokeWidth={1.6} strokeLinecap="round" strokeDasharray="10 14" opacity={0.9}
+          />
+          {/* ford stones at Koyomi crossing */}
+          {[[512, 536], [520, 541], [528, 545]].map(([sx, sy], i) => (
+            <circle key={i} cx={sx} cy={sy} r={2.2} fill="var(--washi)" stroke="var(--sumi)" strokeWidth={0.8} strokeOpacity={0.5} />
+          ))}
+          {/* delta fan into the sea */}
+          <path d="M 430 872 C 424 880, 414 884, 405 888 M 430 872 C 431 882, 432 887, 434 892 M 430 872 C 437 879, 445 884, 453 887"
+            fill="none" stroke="#7FA9BA" strokeWidth={4} strokeLinecap="round" opacity={0.9} />
+          <path d="M 430 872 C 424 880, 414 884, 405 888 M 430 872 C 437 879, 445 884, 453 887"
+            fill="none" stroke="#A9CAD4" strokeWidth={1.4} strokeLinecap="round" opacity={0.85} />
+        </g>
         <path
           d="M 700 610 C 760 640, 790 650, 828 658"
           fill="none" stroke="var(--ai)" strokeWidth={1.8} opacity={0.4} strokeLinecap="round"

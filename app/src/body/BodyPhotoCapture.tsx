@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCamera, type Frame } from '../capture/useCamera';
 import { useApp } from '../state/AppContext';
 import { ApiError } from '../api/http';
+import { PetalLoader } from '../components/PetalLoader';
 import type { BodyPhotoEstimate } from '../api/types';
 
 interface Props {
@@ -146,7 +147,7 @@ export function BodyPhotoCapture({ onClose, onConfirm, reducedMotion }: Props) {
       {frame && analyzing && (
         <div className="capture-center">
           <div className={`glass-ink capture-shimmer ${reducedMotion ? '' : 'shimmering'}`}>
-            <div className="spinner" />
+            <PetalLoader size={44} />
             <div>estimating body composition…</div>
           </div>
         </div>

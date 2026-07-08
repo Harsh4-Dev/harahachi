@@ -20,6 +20,7 @@ import { useApp } from '../state/AppContext';
 import { ApiError } from '../api/http';
 import { useSwipeDown } from '../lib/useSwipeDown';
 import { fmtInt, fmtTime } from '../lib/format';
+import { PetalLoader } from '../components/PetalLoader';
 import type {
   BackendRole,
   KeeperBackend,
@@ -210,7 +211,7 @@ function PairTab() {
     return () => window.clearInterval(t);
   }, [data]);
 
-  if (loading && !data) return <div className="empty">Minting an invite…</div>;
+  if (loading && !data) return <PetalLoader block caption="Minting an invite…" />;
   if (err && !data) return <LoadError onRetry={load} />;
   if (!data) return null;
 
@@ -276,7 +277,7 @@ function OverviewTab() {
 
   useEffect(() => load(), [load]);
 
-  if (loading && !data) return <div className="empty">Reading the road…</div>;
+  if (loading && !data) return <PetalLoader block caption="Reading the road…" />;
   if (err && !data) return <LoadError onRetry={load} />;
   if (!data) return null;
 
@@ -433,7 +434,7 @@ function UserDetail({ row, onBack }: { row: KeeperUserRow; onBack: () => void })
       </div>
 
       {loading && !detail ? (
-        <div className="empty">Loading traveler…</div>
+        <PetalLoader block caption="Loading traveler…" />
       ) : err && !detail ? (
         <LoadError onRetry={load} />
       ) : detail ? (
@@ -524,7 +525,7 @@ function BackendsTab() {
     }
   };
 
-  if (loading && !backends) return <div className="empty">Reading backends…</div>;
+  if (loading && !backends) return <PetalLoader block caption="Reading backends…" />;
   if (err && !backends) return <LoadError onRetry={load} />;
   if (!backends) return null;
 

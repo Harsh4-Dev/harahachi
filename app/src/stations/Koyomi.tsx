@@ -8,6 +8,7 @@ import { fmtInt, monthStr, todayStr, fmtTime } from '../lib/format';
 import { InsightsCard } from '../components/InsightsCard';
 import { WeightTab } from '../components/WeightTab';
 import { StampBook } from '../components/StampBook';
+import { PetalLoader } from '../components/PetalLoader';
 import type { CalendarDay, InsightsResponse, Meal, StreaksResponse } from '../api/types';
 
 const DOW = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
@@ -127,7 +128,7 @@ export function Koyomi() {
         </div>
 
         {loading ? (
-          <div className="spinner" />
+          <PetalLoader block />
         ) : (
           <>
             <div className="cal-grid" style={{ marginBottom: 6 }}>

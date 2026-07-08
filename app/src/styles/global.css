@@ -132,16 +132,18 @@ button {
   font-family: var(--font-body);
   font-weight: 700;
   border: none;
-  border-radius: 14px;
+  border-radius: 12px;
   padding: 12px 18px;
   font-size: 15px;
   background: rgba(255, 255, 255, 0.45);
   color: var(--sumi);
   border: 1px solid rgba(255, 255, 255, 0.4);
-  transition: transform 120ms ease, filter 120ms ease;
+  transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease;
 }
+/* Every button presses the same way: a subtle scale + soft inset shadow. */
 .btn:active {
   transform: scale(0.97);
+  box-shadow: inset 0 1px 4px rgba(43, 42, 51, 0.2);
 }
 .btn-primary {
   background: var(--shu);
@@ -150,7 +152,8 @@ button {
 }
 .btn-ghost {
   background: transparent;
-  border: 1px solid rgba(43, 42, 51, 0.18);
+  border: 1px solid var(--sumi-soft);
+  color: var(--sumi);
 }
 .btn-matcha {
   background: var(--matcha);
@@ -325,13 +328,16 @@ input[type='range']::-moz-range-thumb {
   }
 }
 
+/* One hanko keyframe for the whole app: press in from 1.35×, overshoot with a
+   -3deg settle, land square. Every stamped surface (.stamped, .big-hanko.stamped,
+   .hanko-stamp.stamped, the chat receipt chip) shares this. */
 @keyframes stamp-down {
   0% {
-    transform: scale(1.4) rotate(-8deg);
+    transform: scale(1.35) rotate(-3deg);
     opacity: 0;
   }
   60% {
-    transform: scale(0.94) rotate(2deg);
+    transform: scale(0.97) rotate(1.5deg);
     opacity: 1;
   }
   100% {

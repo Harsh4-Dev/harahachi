@@ -191,6 +191,7 @@ function AnnaiOverlay({ onClose, onDataChanged }: { onClose: () => void; onDataC
 
   // Confirm a proposed action → log it now, then show the stamped receipt chip.
   const confirmAction = async (bubbleId: number, action: ChatAction) => {
+    if ('vibrate' in navigator) navigator.vibrate?.(30);
     try {
       if (action.action === 'log_meal') {
         await logMeal(mealFromAction(action));

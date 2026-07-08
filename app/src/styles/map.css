@@ -31,6 +31,28 @@
   will-change: transform;
 }
 
+/* Station-seal tap: a quick vermillion ring-pulse expands out of the seal that
+   was just selected. Plays once (fill: both) when the active seal mounts. */
+.seal-pulse {
+  fill: none;
+  stroke: var(--shu);
+  stroke-width: 3;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: seal-pulse 520ms ease-out both;
+  pointer-events: none;
+}
+@keyframes seal-pulse {
+  from {
+    transform: scale(1);
+    opacity: 0.55;
+  }
+  to {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+}
+
 /* Drifting petals — transform-only (translate+rotate) so they composite cleanly. */
 .petal {
   animation-name: petal-drift;
@@ -124,6 +146,27 @@
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
   padding-bottom: 12px;
+}
+/* As the panel slides up, its first three cards rise + fade in on a 40ms
+   stagger (each station body is a single wrapper div around its cards). */
+@keyframes card-rise {
+  from {
+    opacity: 0;
+    transform: translateY(9px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.panel-body > * > :nth-child(1) {
+  animation: card-rise 280ms ease-out both;
+}
+.panel-body > * > :nth-child(2) {
+  animation: card-rise 280ms ease-out 40ms both;
+}
+.panel-body > * > :nth-child(3) {
+  animation: card-rise 280ms ease-out 80ms both;
 }
 .panel-grip {
   width: 44px;

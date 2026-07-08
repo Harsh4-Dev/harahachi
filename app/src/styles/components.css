@@ -47,7 +47,7 @@
 /* Card blocks inside panels */
 .card {
   padding: 14px;
-  border-radius: 16px;
+  border-radius: 18px;
   margin-bottom: 12px;
 }
 .card-title {
@@ -315,7 +315,7 @@
 }
 .merch-card {
   padding: 16px;
-  border-radius: 16px;
+  border-radius: 18px;
   text-align: center;
 }
 .merch-emoji {
@@ -344,7 +344,7 @@
 /* Travel permit card (Tegata) */
 .permit {
   padding: 18px;
-  border-radius: 16px;
+  border-radius: 18px;
   position: relative;
 }
 .permit-head {
@@ -756,5 +756,95 @@
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* ---- Sakura-petal loader (signature loading state) ----
+   Five petals orbit + flutter around a kin center. Transform/opacity only so it
+   composites cleanly; prefers-reduced-motion freezes it into a static blossom. */
+.petal-loader {
+  position: relative;
+  display: inline-block;
+  width: var(--pl-size, 34px);
+  height: var(--pl-size, 34px);
+  vertical-align: middle;
+  flex: none;
+}
+.pl-orbit {
+  position: absolute;
+  inset: 0;
+  animation: pl-spin 3.4s linear infinite;
+  will-change: transform;
+}
+.pl-petal {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 30%;
+  height: 36%;
+  /* center on the cluster, rotate to the petal's angle, then push outward */
+  transform: translate(-50%, -50%) rotate(var(--pl-a, 0deg)) translateY(-104%);
+}
+.pl-petal::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--sakura);
+  border-radius: 50% 50% 50% 50% / 70% 70% 32% 32%;
+  box-shadow: inset 0 -1px 2px rgba(217, 108, 138, 0.45);
+  animation: pl-flutter 1.5s ease-in-out infinite;
+  animation-delay: inherit;
+  will-change: transform, opacity;
+}
+.pl-petal:nth-child(even)::before {
+  background: var(--sakura-deep);
+}
+.pl-center {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 22%;
+  height: 22%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: var(--kin);
+  box-shadow: 0 0 0 1px rgba(201, 162, 39, 0.4);
+}
+@keyframes pl-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes pl-flutter {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.92;
+  }
+  50% {
+    transform: scale(0.6);
+    opacity: 0.45;
+  }
+}
+.petal-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 22px 12px;
+  text-align: center;
+}
+.petal-loading .pl-caption {
+  margin: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pl-orbit,
+  .pl-petal::before {
+    animation: none;
+  }
+  .pl-petal::before {
+    transform: none;
+    opacity: 0.92;
   }
 }

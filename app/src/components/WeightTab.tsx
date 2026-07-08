@@ -5,6 +5,7 @@
 import { useEffect, useState } from 'react';
 import { useApp } from '../state/AppContext';
 import { WeightChart } from './WeightChart';
+import { PetalLoader } from './PetalLoader';
 import { todayStr } from '../lib/format';
 import type { WeightEntry, WeightTrendPoint } from '../api/types';
 
@@ -92,7 +93,7 @@ export function WeightTab() {
       <div className="section-label" style={{ marginTop: 16 }}>
         Trend · 推移
       </div>
-      {loading ? <div className="spinner" /> : <WeightChart entries={entries} trend={trend} goalKg={goalKg} />}
+      {loading ? <PetalLoader block /> : <WeightChart entries={entries} trend={trend} goalKg={goalKg} />}
       {!loading && entries.length > 0 && (
         <div className="small muted" style={{ marginTop: 6, textAlign: 'center' }}>
           <span style={{ color: 'var(--sakura-deep)' }}>●</span> daily &nbsp;
