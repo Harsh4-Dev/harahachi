@@ -141,10 +141,13 @@ function Grove({ x, y, seed, n = 7 }: { x: number; y: number; seed: number; n?: 
 function Mountain({ x, y, s = 1, snow = false }: { x: number; y: number; s?: number; snow?: boolean }) {
   return (
     <g transform={`translate(${x} ${y}) scale(${s})`}>
-      <path d="M -46 26 L -8 -44 Q -4 -50 0 -44 L 38 26 Q 0 34 -46 26 Z" fill="var(--washi-deep)" stroke="var(--sumi)" strokeWidth={1.4} strokeOpacity={0.55} />
-      <path d="M -8 -44 L -46 26 Q -22 30 -4 28 L -6 -40 Z" fill="var(--sumi)" opacity={0.14} />
-      <path d="M -6 -38 L -12 -20 M -5 -28 L -14 -4 M -4 -16 L -16 8" stroke="var(--sumi)" strokeWidth={1} fill="none" opacity={0.3} />
-      {snow && <path d="M -14 -32 L -8 -44 Q -4 -50 0 -44 L 6 -33 Q 0 -27 -6 -31 Q -10 -27 -14 -32 Z" fill="var(--washi)" stroke="var(--sumi)" strokeWidth={0.8} strokeOpacity={0.4} />}
+      {/* ink-painted peak per the reference: dark slate body, deeper shaded
+          left face, washi ridge highlights raking down the right */}
+      <path d="M -46 26 L -8 -44 Q -4 -50 0 -44 L 38 26 Q 0 34 -46 26 Z" fill="#5C6E80" stroke="#3E4C5C" strokeWidth={1.2} />
+      <path d="M -8 -44 L -46 26 Q -22 30 -4 28 L -6 -40 Z" fill="#435363" opacity={0.9} />
+      <path d="M -3 -40 L 6 -18 M -2 -30 L 12 -2 M 0 -18 L 18 12" stroke="#8DA0AF" strokeWidth={1.2} fill="none" opacity={0.7} strokeLinecap="round" />
+      <path d="M -10 -30 L -20 -6 M -12 -18 L -26 12" stroke="#2F3B49" strokeWidth={1} fill="none" opacity={0.5} strokeLinecap="round" />
+      {snow && <path d="M -14 -32 L -8 -44 Q -4 -50 0 -44 L 6 -33 Q 0 -27 -6 -31 Q -10 -27 -14 -32 Z" fill="var(--washi)" stroke="#3E4C5C" strokeWidth={0.8} strokeOpacity={0.6} />}
     </g>
   );
 }
@@ -168,12 +171,18 @@ function Range({ x, y, n, s = 1, seed = 0 }: { x: number; y: number; n: number; 
 
 // Stylized pine tree (layered canopy over an ink trunk).
 function Pine({ x, y, s = 1, autumn = false }: { x: number; y: number; s?: number; autumn?: boolean }) {
-  const c = autumn ? 'var(--kin)' : 'var(--matcha)';
+  // Dense dark canopies per the reference: clumped round crowns in deep forest
+  // green with a lighter top highlight, over a short ink trunk.
+  const c = autumn ? 'var(--kin)' : '#4E6647';
+  const hi = autumn ? '#DDB84A' : '#6B855C';
   return (
     <g transform={`translate(${x} ${y}) scale(${s})`}>
-      <line x1={0} y1={0} x2={0} y2={-7} stroke="var(--sumi)" strokeWidth={1.6} opacity={0.65} />
-      <path d="M -9 -5 Q 0 -18 9 -5 Q 0 -1 -9 -5 Z" fill={c} opacity={0.85} stroke="var(--sumi)" strokeWidth={0.7} strokeOpacity={0.35} />
-      <path d="M -6 -12 Q 0 -22 6 -12 Q 0 -8 -6 -12 Z" fill={c} stroke="var(--sumi)" strokeWidth={0.7} strokeOpacity={0.35} />
+      <line x1={0} y1={0} x2={0} y2={-6} stroke="#3B3A33" strokeWidth={1.8} opacity={0.8} />
+      <circle cx={-5} cy={-8} r={5.2} fill={c} />
+      <circle cx={5} cy={-8} r={5} fill={c} />
+      <circle cx={0} cy={-13} r={5.8} fill={c} />
+      <circle cx={-1.5} cy={-14.5} r={3} fill={hi} opacity={0.8} />
+      <path d="M -9.5 -6.5 Q 0 -2.5 9.5 -6.5" fill="none" stroke="#33452F" strokeWidth={0.9} opacity={0.55} />
     </g>
   );
 }
@@ -480,6 +489,35 @@ function SakuraMapImpl({ active, travelerT, onSelect, reducedMotion }: Props) {
           ))}
         </g>
 
+        {/* Sea décor per the reference: vermillion star motifs + white
+            blossom sprigs floating on open water */}
+        <g pointerEvents="none">
+          {[
+            { x: 320, y: 945, s: 1.0 }, { x: 600, y: 950, s: 0.8 },
+            { x: 60, y: 430, s: 0.9 }, { x: 945, y: 620, s: 0.85 },
+            { x: 240, y: 55, s: 0.7 },
+          ].map((p, i) => (
+            <g key={i} transform={`translate(${p.x} ${p.y}) scale(${p.s})`} stroke="var(--shu)" strokeWidth={1.5} strokeLinecap="round" opacity={0.85}>
+              <path d="M 0 -8 V 8 M -8 0 H 8 M -5.5 -5.5 L 5.5 5.5 M -5.5 5.5 L 5.5 -5.5" />
+              <circle r={2} fill="var(--shu)" stroke="none" />
+              {[0, 45, 90, 135].map((deg) => (
+                <circle key={deg} cx={0} cy={-11} r={0.9} fill="var(--shu)" stroke="none" transform={`rotate(${deg + 22})`} />
+              ))}
+            </g>
+          ))}
+          {[
+            { x: 150, y: 950 }, { x: 880, y: 930 }, { x: 55, y: 240 },
+          ].map((p, i) => (
+            <g key={i} transform={`translate(${p.x} ${p.y})`} opacity={0.9}>
+              <path d="M 0 8 Q 3 0 8 -6" fill="none" stroke="#FDFBF4" strokeWidth={1.2} />
+              {[[0, 0], [5, -4], [9, -8], [3, -8]].map(([bx, by], j) => (
+                <circle key={j} cx={bx} cy={by} r={2.6} fill="#FDFBF4" />
+              ))}
+              <circle cx={5} cy={-5} r={1} fill="var(--sakura-deep)" opacity={0.7} />
+            </g>
+          ))}
+        </g>
+
         {/* The continent */}
         <path d={COAST_D} fill="var(--washi)" stroke="var(--sumi)" strokeWidth={2.2} strokeOpacity={0.55} />
 
@@ -487,9 +525,13 @@ function SakuraMapImpl({ active, travelerT, onSelect, reducedMotion }: Props) {
         <path d={blob(105, 150, 34, 2)} fill="var(--washi)" stroke="var(--sumi)" strokeWidth={1.5} strokeOpacity={0.5} />
         <path d={blob(925, 855, 42, 9)} fill="var(--washi)" stroke="var(--sumi)" strokeWidth={1.5} strokeOpacity={0.5} />
 
-        {/* Province tints — faction territories on the game map */}
+        {/* Province tints — the central forest meadow reads as a real
+            moss-green heart of the continent (per the reference); the sakura
+            province stays a soft blush */}
         <path d={blob(330, 780, 150, 4)} fill="var(--sakura)" opacity={0.14} />
-        <path d={blob(680, 400, 130, 7)} fill="var(--matcha)" opacity={0.13} />
+        <path d={blob(680, 400, 130, 7)} fill="#8CA66B" opacity={0.34} />
+        <path d={blob(420, 560, 170, 12)} fill="#8CA66B" opacity={0.28} />
+        <path d={blob(430, 555, 172, 12)} fill="none" stroke="#6B855C" strokeWidth={1.2} opacity={0.35} />
 
         {/* Province & domain borders (DESIGN.md 6.7): hand-drawn dashed --sumi
             boundaries enclosing the two tinted provinces plus a few implied
@@ -530,39 +572,23 @@ function SakuraMapImpl({ active, travelerT, onSelect, reducedMotion }: Props) {
         <Ridge x={430} y={430} n={3} rot={-8} />
         <Ridge x={620} y={560} n={3} rot={-14} />
 
-        {/* River → sea. Springs quietly from the northern highlands (no
-            waterfall/cliff/pool), then widens downstream (layered strokes: dark
-            bed, mid water, light current), fords at Koyomi, and opens into a
-            fanned delta at the south coast. */}
+        {/* No rivers — per the reference, the land reads as trail + forest +
+            meadow only. Decorative white cloud puffs drift over terrain edges,
+            and the sea carries vermillion star motifs + white blossom sprigs. */}
         <g pointerEvents="none">
-          {/* river: bed, water, current highlight — springs from the highlands,
-              widening downstream */}
-          <path
-            d="M 545 356 C 520 420, 560 470, 520 540 C 480 610, 500 700, 450 760 C 420 800, 440 840, 430 872"
-            fill="none" stroke="#4A6E86" strokeWidth={9} strokeLinecap="round" opacity={0.9}
-          />
-          <path
-            d="M 545 356 C 520 420, 560 470, 520 540 C 480 610, 500 700, 450 760 C 420 800, 440 840, 430 872"
-            fill="none" stroke="#7FA9BA" strokeWidth={5.5} strokeLinecap="round"
-          />
-          <path
-            d="M 545 358 C 521 420, 559 470, 520 540 C 481 610, 499 700, 450 760 C 421 800, 439 840, 430 870"
-            fill="none" stroke="#A9CAD4" strokeWidth={1.6} strokeLinecap="round" strokeDasharray="10 14" opacity={0.9}
-          />
-          {/* ford stones at Koyomi crossing */}
-          {[[512, 536], [520, 541], [528, 545]].map(([sx, sy], i) => (
-            <circle key={i} cx={sx} cy={sy} r={2.2} fill="var(--washi)" stroke="var(--sumi)" strokeWidth={0.8} strokeOpacity={0.5} />
+          {[
+            { x: 470, y: 395, s: 1.0 }, { x: 615, y: 300, s: 0.8 },
+            { x: 350, y: 545, s: 0.9 }, { x: 545, y: 705, s: 0.85 },
+            { x: 685, y: 505, s: 0.75 },
+          ].map((c, i) => (
+            <g key={i} transform={`translate(${c.x} ${c.y}) scale(${c.s})`} opacity={0.92}>
+              <ellipse cx={-9} cy={2} rx={10} ry={5.5} fill="#FDFBF4" />
+              <ellipse cx={2} cy={-2} rx={12} ry={7} fill="#FDFBF4" />
+              <ellipse cx={13} cy={2.5} rx={9} ry={5} fill="#FDFBF4" />
+              <path d="M -19 4 Q 2 10 22 4" fill="none" stroke="var(--sumi)" strokeWidth={0.8} opacity={0.18} />
+            </g>
           ))}
-          {/* delta fan into the sea */}
-          <path d="M 430 872 C 424 880, 414 884, 405 888 M 430 872 C 431 882, 432 887, 434 892 M 430 872 C 437 879, 445 884, 453 887"
-            fill="none" stroke="#7FA9BA" strokeWidth={4} strokeLinecap="round" opacity={0.9} />
-          <path d="M 430 872 C 424 880, 414 884, 405 888 M 430 872 C 437 879, 445 884, 453 887"
-            fill="none" stroke="#A9CAD4" strokeWidth={1.4} strokeLinecap="round" opacity={0.85} />
         </g>
-        <path
-          d="M 700 610 C 760 640, 790 650, 828 658"
-          fill="none" stroke="var(--ai)" strokeWidth={1.8} opacity={0.4} strokeLinecap="round"
-        />
 
         {/* Dense pine forests (with the odd autumn tree) */}
         <Forest x={290} y={710} n={12} seed={3} spread={60} />
