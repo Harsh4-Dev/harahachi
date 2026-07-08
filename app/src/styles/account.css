@@ -895,20 +895,31 @@
   font-weight: 700;
 }
 
-/* Floating timer pill (every screen except Dōjō) */
+/* Workout timer strip (every screen except Dōjō): docked directly beneath
+   the top calorie ribbon, Dynamic-Island style — same width, slim glass,
+   drops in from under the ribbon. Tap jumps to Dōjō. */
 .timer-pill {
   position: fixed;
-  left: 16px;
-  bottom: calc(var(--safe-bottom) + 18px);
-  z-index: 60;
+  top: calc(var(--safe-top) + 8px + var(--ribbon-h) + 6px);
+  left: 10px;
+  right: 10px;
+  z-index: 29; /* just under the ribbon so it reads as attached to it */
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 9px 14px;
-  border-radius: 999px;
+  justify-content: center;
+  gap: 10px;
+  padding: 7px 14px;
+  border-radius: 14px;
   border: 1px solid rgba(255, 255, 255, 0.25);
   cursor: pointer;
-  animation: reminder-slide 260ms ease-out both;
+  animation: timer-drop 260ms ease-out both;
+}
+@keyframes timer-drop {
+  from { transform: translateY(-10px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .timer-pill { animation: none; }
 }
 .timer-pill-type {
   font-weight: 700;
