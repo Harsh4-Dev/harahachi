@@ -1,0 +1,760 @@
+/* Signature + shared component styling. */
+
+/* Journey bar */
+.journey-bar {
+  width: 100%;
+}
+.journey-label {
+  text-align: center;
+  font-size: 15px;
+  margin-top: 2px;
+}
+.journey-label strong {
+  font-family: var(--font-display);
+  font-size: 20px;
+}
+.journey-label .ri {
+  color: var(--sakura-deep);
+  font-weight: 600;
+}
+.journey-label .burned {
+  color: var(--matcha);
+}
+
+/* Macro paths */
+.macro-path {
+  margin: 6px 0;
+}
+.macro-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+.macro-kanji {
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 700;
+}
+.macro-label {
+  color: var(--sumi-soft);
+  flex: 1;
+}
+.macro-val {
+  font-feature-settings: 'tnum';
+}
+
+/* Card blocks inside panels */
+.card {
+  padding: 14px;
+  border-radius: 16px;
+  margin-bottom: 12px;
+}
+.card-title {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+.section-label {
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sumi-soft);
+  margin: 14px 0 6px;
+}
+
+/* Meal list rows */
+.meal-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.35);
+  margin-bottom: 8px;
+}
+.meal-row .meal-main {
+  min-width: 0;
+}
+.meal-row .meal-dish {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 60vw;
+}
+.meal-row .meal-sub {
+  font-size: 12px;
+  color: var(--sumi-soft);
+}
+.meal-kcal {
+  font-family: var(--font-display);
+  font-feature-settings: 'tnum';
+  font-weight: 700;
+  white-space: nowrap;
+}
+.icon-btn {
+  border: none;
+  background: transparent;
+  font-size: 18px;
+  padding: 4px 8px;
+  color: var(--sumi-soft);
+}
+
+/* Suggestion cards */
+.suggestion {
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.4);
+  margin-bottom: 10px;
+}
+.suggestion .s-dish {
+  font-family: var(--font-display);
+  font-weight: 700;
+}
+.suggestion .s-reason {
+  font-size: 12.5px;
+  color: var(--sumi-soft);
+  margin: 4px 0 8px;
+}
+
+/* Confirm card */
+.confirm-card {
+  padding: 16px;
+}
+.confirm-dish {
+  font-size: 19px;
+  line-height: 1.2;
+  margin-bottom: 6px;
+}
+.confirm-kcal {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.confirm-kcal .big {
+  font-family: var(--font-display);
+  font-size: 34px;
+  font-weight: 800;
+}
+.conf {
+  margin-left: auto;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+.conf-ok {
+  background: var(--matcha);
+  color: var(--washi);
+}
+.conf-low {
+  background: var(--kin);
+  color: var(--sumi);
+}
+.confirm-items {
+  list-style: none;
+  padding: 0;
+  margin: 4px 0;
+}
+.confirm-items li {
+  padding: 2px 0;
+}
+.confirm-question {
+  padding: 10px 12px;
+  margin: 10px 0;
+  border-radius: 12px;
+}
+.confirm-portion {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 14px 0;
+}
+.confirm-actions {
+  margin-top: 8px;
+}
+
+/* Hanko stamp button */
+.hanko-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: none;
+  background: transparent;
+  padding: 4px;
+}
+.hanko-inner {
+  width: 58px;
+  height: 58px;
+  border-radius: 12px;
+  background: var(--shu);
+  border: 3px solid #a52f2b;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 4px 10px rgba(199, 62, 58, 0.4);
+}
+.hanko-glyph {
+  font-family: var(--font-display);
+  font-size: 30px;
+  font-weight: 800;
+  color: var(--washi);
+}
+.hanko-label {
+  font-weight: 700;
+  color: var(--shu);
+}
+
+/* Camera capture */
+.capture-zone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 22px;
+  border-radius: 18px;
+  border: 2px dashed rgba(43, 42, 51, 0.25);
+  text-align: center;
+}
+.capture-preview {
+  width: 100%;
+  max-height: 240px;
+  object-fit: cover;
+  border-radius: 14px;
+}
+.capture-icon {
+  font-size: 42px;
+}
+.hidden-input {
+  display: none;
+}
+
+/* Portion pills */
+.pill-group {
+  display: flex;
+  gap: 8px;
+}
+.pill {
+  flex: 1;
+  padding: 9px;
+  border-radius: 12px;
+  border: 1px solid rgba(43, 42, 51, 0.18);
+  background: rgba(255, 255, 255, 0.4);
+  text-align: center;
+  font-size: 14px;
+}
+.pill.active {
+  background: var(--sakura-deep);
+  color: var(--washi);
+  border-color: var(--sakura-deep);
+}
+
+/* Calendar heat-map */
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 6px;
+}
+.cal-dow {
+  text-align: center;
+  font-size: 11px;
+  color: var(--sumi-soft);
+  padding-bottom: 4px;
+}
+.cal-cell {
+  aspect-ratio: 1;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-family: var(--font-display);
+  font-feature-settings: 'tnum';
+  border: 1px solid rgba(43, 42, 51, 0.08);
+  color: var(--sumi);
+}
+.cal-empty {
+  background: var(--washi-deep);
+  opacity: 0.6;
+}
+.cal-on {
+  background: var(--matcha);
+  color: var(--washi);
+}
+.cal-under {
+  background: var(--sakura);
+}
+.cal-over {
+  background: var(--shu);
+  color: var(--washi);
+}
+.cal-cell.today {
+  outline: 2px solid var(--sumi);
+  outline-offset: 1px;
+}
+.cal-legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  margin-top: 12px;
+}
+.cal-legend .swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  display: inline-block;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+/* Store cards */
+.merch-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.merch-card {
+  padding: 16px;
+  border-radius: 16px;
+  text-align: center;
+}
+.merch-emoji {
+  font-size: 40px;
+}
+.deep-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 14px;
+  border-radius: 14px;
+  margin-bottom: 10px;
+  text-decoration: none;
+  color: var(--sumi);
+  background: rgba(255, 255, 255, 0.4);
+}
+.deep-link .dl-emoji {
+  font-size: 24px;
+}
+.coming-soon {
+  font-size: 11px;
+  color: var(--sumi-soft);
+  margin-top: 4px;
+}
+
+/* Travel permit card (Tegata) */
+.permit {
+  padding: 18px;
+  border-radius: 16px;
+  position: relative;
+}
+.permit-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+.permit-seal {
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
+  background: var(--shu);
+  color: var(--washi);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 800;
+  transform: rotate(6deg);
+}
+.permit-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 16px;
+}
+.permit-grid .k {
+  font-size: 11px;
+  color: var(--sumi-soft);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.permit-grid .v {
+  font-family: var(--font-display);
+  font-feature-settings: 'tnum';
+  font-size: 17px;
+}
+
+/* Water row (Honjin, v3) */
+.water-row {
+  margin-top: 14px;
+}
+.water-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.water-label {
+  font-size: 13px;
+  color: var(--sumi);
+}
+.water-undo {
+  border: 1px solid rgba(45, 74, 99, 0.3);
+  background: transparent;
+  color: var(--ai);
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  font-size: 18px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+}
+.water-undo:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.water-cups {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.water-cup {
+  background: transparent;
+  border: none;
+  padding: 2px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  transition: transform 120ms ease;
+}
+.water-cup:active {
+  transform: scale(0.9);
+}
+.water-cup.filled {
+  filter: drop-shadow(0 1px 2px rgba(45, 74, 99, 0.35));
+}
+.water-overflow {
+  font-size: 12px;
+  color: var(--ai);
+  font-family: var(--font-display);
+  margin-left: 2px;
+}
+
+/* Streak chip (Honjin, v3) */
+.streak-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.streak-seal {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 14px;
+  color: var(--washi);
+  background: var(--shu);
+  border: 2px solid #a52f2b;
+  border-radius: 8px;
+  padding: 3px 7px;
+  transform: rotate(-4deg);
+  box-shadow: 0 2px 6px rgba(199, 62, 58, 0.35);
+}
+.streak-text {
+  font-size: 12px;
+  color: var(--sumi-soft);
+}
+.streak-best {
+  color: var(--sumi-soft);
+  opacity: 0.8;
+}
+
+/* "From your road" quick-log carousel (Chaya, v3) */
+.quicklog-scroll {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 4px 2px 8px;
+  scroll-snap-type: x mandatory;
+  -webkit-overflow-scrolling: touch;
+}
+.quicklog-card {
+  flex: 0 0 auto;
+  width: 150px;
+  padding: 12px;
+  border-radius: 14px;
+  position: relative;
+  scroll-snap-align: start;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.quicklog-fav {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  border: none;
+  background: transparent;
+  font-size: 17px;
+  line-height: 1;
+  color: var(--sumi-soft);
+  padding: 2px;
+}
+.quicklog-fav.on {
+  color: var(--sakura-deep);
+}
+.quicklog-dish {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 14px;
+  line-height: 1.2;
+  padding-right: 18px;
+  min-height: 34px;
+}
+.quicklog-kcal {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 15px;
+}
+.quicklog-log {
+  margin-top: 8px;
+  padding: 7px;
+  font-size: 14px;
+}
+
+/* Koyomi tabs (v3) */
+.koyomi-tabs {
+  margin-bottom: 12px;
+}
+.koyomi-tabs .pill {
+  font-family: var(--font-display);
+}
+
+/* Weight tab (v3) */
+.weight-stepper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+}
+.weight-val {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 96px;
+  justify-content: center;
+}
+.weight-val .display {
+  font-size: 40px;
+  font-weight: 800;
+}
+.weight-chart {
+  display: block;
+  margin-top: 6px;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 12px;
+}
+
+/* Stamp book 御朱印帳 (v3) */
+.stamp-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+}
+.stamp {
+  aspect-ratio: 1;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  position: relative;
+  background: rgba(199, 62, 58, 0.08);
+  border: 2px solid var(--shu);
+  color: var(--shu);
+}
+.stamp::after {
+  /* faint double ring, goshuin flavor */
+  content: '';
+  position: absolute;
+  inset: 3px;
+  border-radius: 8px;
+  border: 1px solid var(--shu);
+  opacity: 0.45;
+}
+.stamp-glyph {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 20px;
+  line-height: 1;
+}
+.stamp-day {
+  position: absolute;
+  bottom: 3px;
+  right: 5px;
+  font-size: 9px;
+  opacity: 0.7;
+}
+.stamp-milestone {
+  border-color: var(--kin);
+  color: var(--shu);
+  background: rgba(201, 162, 39, 0.14);
+  box-shadow: 0 0 0 2px var(--kin) inset, 0 2px 8px rgba(201, 162, 39, 0.35);
+}
+.stamp-milestone::after {
+  border-color: var(--kin);
+}
+.stamp-first_log {
+  background: rgba(216, 108, 138, 0.14);
+}
+.stamp-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 12px;
+}
+.stamp-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  display: inline-block;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.stamp-swatch.stamp-on {
+  background: var(--shu);
+}
+.stamp-swatch.stamp-gold {
+  background: var(--kin);
+}
+
+/* Weekly insights scroll card (v3) */
+.insights-scroll {
+  border-left: 3px solid var(--shu);
+}
+.insights-adherence {
+  text-align: right;
+  line-height: 1.1;
+}
+.insights-adherence .ia-num {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--matcha);
+}
+.insights-averages {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+.insights-averages .ia-k {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--sumi-soft);
+}
+.insights-averages .ia-v {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 700;
+}
+.insights-split {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(43, 42, 51, 0.08);
+}
+.insights-split .seg {
+  height: 100%;
+}
+.insights-split .seg-p {
+  background: var(--matcha);
+}
+.insights-split .seg-c {
+  background: var(--ai);
+}
+.insights-split .seg-f {
+  background: var(--kin);
+}
+.insights-split-legend {
+  display: flex;
+  gap: 12px;
+  margin: 4px 0 12px;
+}
+.insights-days {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.iday {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.35);
+}
+.iday-seal {
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 15px;
+  color: var(--washi);
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+}
+.iday-best .iday-seal {
+  background: var(--matcha);
+}
+.iday-worst .iday-seal {
+  background: var(--shu);
+}
+.iday-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+.insights-summary {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.insights-summary .annai-avatar {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: var(--shu);
+  color: var(--washi);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 13px;
+}
+
+/* Empty / loading */
+.empty {
+  text-align: center;
+  color: var(--sumi-soft);
+  padding: 24px 12px;
+  font-size: 14px;
+}
+.spinner {
+  width: 26px;
+  height: 26px;
+  border: 3px solid rgba(43, 42, 51, 0.2);
+  border-top-color: var(--shu);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 18px auto;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

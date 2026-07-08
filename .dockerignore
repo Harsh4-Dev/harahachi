@@ -1,0 +1,28 @@
+# Build context is the repo root (docker build -f server/Dockerfile -t harahachi .)
+# Keep it lean: only server/{requirements.txt,sekisho,nginx,docker-entrypoint.sh}
+# and app/dist are actually COPYed by the Dockerfile.
+
+.git
+**/__pycache__
+**/*.pyc
+
+# Python virtualenv (huge, host-specific)
+server/.venv
+
+# App source & deps — only app/dist is needed in the image
+app/node_modules
+app/src
+app/public
+app/.env
+app/.env.*
+app/*.tsbuildinfo
+
+# SQLite data / logs
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.log
+
+# Docs / meta
+**/README.md
+*.md

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="96" fill="#F3ECDA"/>
+  <!-- vermillion hanko seal -->
+  <rect x="96" y="96" width="320" height="320" rx="44" fill="#C73E3A"/>
+  <rect x="120" y="120" width="272" height="272" rx="30" fill="none" stroke="#F3ECDA" stroke-width="10" opacity="0.55"/>
+  <!-- kanji 本 (Honjin / home) -->
+  <text x="256" y="256" text-anchor="middle" dominant-baseline="central"
+        font-family="'Shippori Mincho','Times New Roman',serif" font-size="230" font-weight="800" fill="#F3ECDA">本</text>
+  <!-- small sakura blossom accent -->
+  <g transform="translate(390 128)">
+    <g fill="#E8A7B8">
+      <ellipse cx="0" cy="-14" rx="9" ry="15"/>
+      <ellipse cx="0" cy="-14" rx="9" ry="15" transform="rotate(72)"/>
+      <ellipse cx="0" cy="-14" rx="9" ry="15" transform="rotate(144)"/>
+      <ellipse cx="0" cy="-14" rx="9" ry="15" transform="rotate(216)"/>
+      <ellipse cx="0" cy="-14" rx="9" ry="15" transform="rotate(288)"/>
+    </g>
+    <circle r="6" fill="#C9A227"/>
+  </g>
+</svg>

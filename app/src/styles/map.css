@@ -1,0 +1,174 @@
+/* Map + shell layout. */
+
+.shell {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+
+.map-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: manipulation;
+}
+
+.map-group {
+  transition: transform 700ms cubic-bezier(0.22, 0.9, 0.31, 1);
+  transform-origin: 0 0;
+  /* Promote the pan/zoom group to its own compositor layer so the 700ms
+     transform tween runs on the GPU instead of repainting the whole map. */
+  will-change: transform;
+}
+.map-group.no-anim {
+  transition: none;
+}
+
+.traveler {
+  transition: transform 600ms cubic-bezier(0.22, 0.9, 0.31, 1);
+  will-change: transform;
+}
+
+/* Drifting petals — transform-only (translate+rotate) so they composite cleanly. */
+.petal {
+  animation-name: petal-drift;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  will-change: transform;
+}
+/* Pause every petal while a station panel is open (see SakuraMap). */
+.petals.paused .petal {
+  animation-play-state: paused;
+}
+
+/* Top glass ribbon */
+.ribbon {
+  position: absolute;
+  top: calc(var(--safe-top) + 8px);
+  left: 10px;
+  right: 10px;
+  height: var(--ribbon-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 0 14px;
+  z-index: 30;
+}
+.ribbon .station-name {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.05;
+}
+.ribbon .station-name .kanji {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 700;
+}
+.ribbon .station-name .romaji {
+  font-size: 11px;
+  color: var(--sumi-soft);
+}
+.ribbon .kcal {
+  font-family: var(--font-display);
+  font-feature-settings: 'tnum';
+  font-size: 15px;
+  text-align: center;
+  flex: 1;
+}
+.ribbon .kcal .frac {
+  font-size: 17px;
+}
+.ribbon .back {
+  border: none;
+  background: transparent;
+  font-size: 22px;
+  padding: 6px 10px;
+  color: var(--sumi);
+}
+
+/* Station panel sliding over the lower 70% */
+.panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 72%;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  border-radius: 24px 24px 0 0;
+  padding: 16px 16px calc(16px + var(--safe-bottom));
+  animation: sheet-up 280ms ease-out both;
+  /* The panel slides up via transform+opacity; hint the compositor. It unmounts
+     when closed, so the layer is released automatically. */
+  will-change: transform, opacity;
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.panel-head h2 {
+  font-size: 22px;
+}
+.panel-head .kanji-big {
+  font-family: var(--font-display);
+  font-size: 30px;
+  color: var(--shu);
+}
+.panel-body {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 12px;
+}
+.panel-grip {
+  width: 44px;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(43, 42, 51, 0.25);
+  margin: 0 auto 10px;
+}
+
+/* Hint chip at very bottom of full map */
+.map-hint {
+  position: absolute;
+  bottom: calc(14px + var(--safe-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 15;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--sumi-soft);
+}
+
+/* Toasts */
+.toasts {
+  position: absolute;
+  top: calc(var(--safe-top) + 70px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(92%, 420px);
+  pointer-events: none;
+}
+.toast {
+  padding: 10px 14px;
+  font-size: 13px;
+  border-radius: 12px;
+  animation: toast-in 220ms ease-out both;
+  pointer-events: auto;
+}
+.toast-warn {
+  border-left: 4px solid var(--shu);
+}
+.toast-ok {
+  border-left: 4px solid var(--matcha);
+}

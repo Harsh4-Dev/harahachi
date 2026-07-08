@@ -1,0 +1,33 @@
+{
+  "name": "harahachi",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Harahachi (腹八分) — photo-first calorie & macro tracker PWA, styled as a journey across an old Japanese sakura map.",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -b --noEmit",
+    "apk:sync": "npm run build && npx cap sync android",
+    "apk:build": "cd android && gradlew assembleDebug"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.4.1",
+    "@capacitor/core": "^8.4.1",
+    "@capacitor/local-notifications": "^8.2.0",
+    "@zxing/browser": "^0.2.1",
+    "qr-scanner": "^1.4.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.4.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vite-plugin-pwa": "^0.21.1"
+  }
+}

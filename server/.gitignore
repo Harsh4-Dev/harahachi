@@ -1,0 +1,21 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Sekisho runtime data
+sekisho.db
+sekisho.db-shm
+sekisho.db-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Logs
+*.log
+server_out.log
+server_err.log
+
+# TLS certs (generated locally / by certgen)
+nginx/certs/*.pem

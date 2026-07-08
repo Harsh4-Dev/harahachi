@@ -1,0 +1,185 @@
+/* Onboarding + pairing: the unrolling tegata scroll. */
+
+.scroll-flow {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--safe-top) + 14px) 14px calc(var(--safe-bottom) + 14px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  background:
+    radial-gradient(120% 80% at 50% 0%, rgba(217, 108, 138, 0.14), transparent 60%),
+    var(--washi);
+}
+
+.scroll-sheet {
+  width: min(460px, 100%);
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-radius: 20px;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Rolled scroll ends */
+.scroll-top,
+.scroll-bottom {
+  height: 14px;
+  flex: 0 0 auto;
+  background: linear-gradient(var(--washi-deep), rgba(233, 223, 198, 0.4));
+  border-top: 1px solid rgba(43, 42, 51, 0.12);
+}
+.scroll-bottom {
+  background: linear-gradient(rgba(233, 223, 198, 0.4), var(--washi-deep));
+  border-top: none;
+  border-bottom: 1px solid rgba(43, 42, 51, 0.12);
+}
+
+.scroll-dots {
+  display: flex;
+  gap: 7px;
+  justify-content: center;
+  padding: 14px 0 2px;
+}
+.scroll-dots .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(43, 42, 51, 0.2);
+}
+.scroll-dots .dot.on {
+  background: var(--shu);
+  transform: scale(1.15);
+}
+
+.scroll-body {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 12px 20px 4px;
+}
+
+.scroll-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 20px 16px;
+}
+
+.ob-step {
+  animation: sheet-up 280ms ease-out both;
+}
+.ob-kanji {
+  font-family: var(--font-display);
+  font-size: 40px;
+  color: var(--shu);
+  margin-bottom: 4px;
+}
+.ob-title {
+  font-size: 26px;
+  margin-bottom: 8px;
+}
+.ob-step p {
+  line-height: 1.5;
+}
+
+/* Slider readout above the range track */
+.slider-readout {
+  font-family: var(--font-display);
+  font-feature-settings: 'tnum';
+  font-size: 26px;
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+/* Choice lists (activity, goal) */
+.choice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(43, 42, 51, 0.16);
+  background: rgba(255, 255, 255, 0.4);
+}
+.choice.active {
+  border-color: var(--sakura-deep);
+  background: rgba(217, 108, 138, 0.16);
+}
+.choice-label {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 16px;
+}
+.choice-note {
+  font-size: 12px;
+  color: var(--sumi-soft);
+}
+
+.target-preview {
+  margin-top: 14px;
+  padding: 14px;
+  border-radius: 14px;
+  text-align: center;
+}
+.target-preview .small {
+  opacity: 0.85;
+}
+
+/* The big final hanko stamp */
+.big-hanko {
+  width: 132px;
+  height: 132px;
+  margin: 20px auto;
+  border-radius: 22px;
+  background: var(--shu);
+  border: 5px solid #a52f2b;
+  display: grid;
+  place-items: center;
+  box-shadow: 0 8px 24px rgba(199, 62, 58, 0.4);
+}
+.big-hanko-initial {
+  font-family: var(--font-display);
+  font-size: 64px;
+  font-weight: 800;
+  color: var(--washi);
+}
+.big-hanko.stamped {
+  animation: stamp-down 260ms cubic-bezier(0.22, 0.9, 0.31, 1) both;
+}
+
+/* QR scanner */
+.qr-frame {
+  margin-top: 12px;
+}
+.qr-video {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  border-radius: 16px;
+  background: #000;
+  border: 2px solid rgba(43, 42, 51, 0.2);
+}
+
+.link-btn {
+  border: none;
+  background: transparent;
+  color: var(--ai);
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: underline;
+  padding: 8px;
+}
+.link-btn:disabled {
+  opacity: 0.5;
+}

@@ -1,0 +1,855 @@
+/* v2 styling: accounts + PIN pad, body-fat picker, body-photo result, Annai
+   chat, reminder banner, shared error surface, crash screen, pristine fields. */
+
+/* ---- Pristine (unset) numeric fields (clean first-open) ---- */
+.stepper-val.unset,
+.slider-readout.unset {
+  color: var(--sumi-soft);
+  opacity: 0.5;
+}
+
+/* ---- Account: PIN dots + glass numpad ---- */
+.pin-dots {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  padding: 8px 0 4px;
+}
+.pin-dot {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(43, 42, 51, 0.35);
+  background: transparent;
+  transition: background 120ms ease, transform 120ms ease;
+}
+.pin-dot.filled {
+  background: var(--shu);
+  border-color: var(--shu);
+  transform: scale(1.05);
+}
+
+.numpad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin: 12px 0 6px;
+}
+.numkey {
+  padding: 16px 0;
+  border-radius: 14px;
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--sumi);
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  transition: transform 100ms ease, filter 100ms ease;
+}
+.numkey:active {
+  transform: scale(0.94);
+  filter: brightness(0.96);
+}
+.numkey-back {
+  color: var(--shu);
+}
+.numkey-spacer {
+  /* keeps the 0 centred in the bottom row */
+}
+
+.account-err {
+  color: var(--shu);
+  text-align: center;
+  margin: 4px 0 10px;
+  font-weight: 600;
+}
+
+/* ---- Body-fat picker ---- */
+.body-picker {
+  margin: 10px 0 4px;
+}
+.bodyrow {
+  margin-bottom: 14px;
+}
+.bodyrow-title {
+  color: var(--sumi-soft);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.bodyrow-scroll {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 2px 8px;
+  scroll-snap-type: x proximity;
+}
+.body-tile {
+  flex: 0 0 auto;
+  width: 78px;
+  padding: 8px 6px 6px;
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  border: 2px solid transparent;
+  scroll-snap-align: start;
+  background: rgba(243, 236, 218, calc(var(--glass-alpha) * 0.9));
+}
+.body-tile.selected {
+  border-color: var(--shu);
+  box-shadow: 0 0 0 1px var(--shu), 0 6px 16px rgba(199, 62, 58, 0.22);
+}
+.body-tile-label {
+  font-size: 10.5px;
+  text-align: center;
+  color: var(--sumi-soft);
+  line-height: 1.15;
+}
+.body-silhouette {
+  display: block;
+}
+
+/* ---- Body-photo capture: framing guide + result ---- */
+.body-guide {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.body-guide-oval {
+  width: 46%;
+  height: 66%;
+  border: 2px dashed rgba(255, 255, 255, 0.6);
+  border-radius: 46% / 40%;
+}
+.body-guide .reticle-hint {
+  position: absolute;
+  bottom: 22%;
+}
+.body-result {
+  max-width: 340px;
+}
+.body-result-pct {
+  font-family: var(--font-display);
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+}
+.body-result-pct .big {
+  font-size: 46px;
+  font-weight: 800;
+}
+
+/* ---- Annai chat: FAB + overlay ---- */
+.annai-fab {
+  position: fixed;
+  right: 16px;
+  bottom: calc(var(--safe-bottom) + 18px);
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 26px;
+  z-index: 60;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+.annai-torii {
+  line-height: 1;
+}
+
+.annai-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(43, 42, 51, 0.28);
+  backdrop-filter: blur(2px);
+}
+.annai-sheet {
+  width: min(520px, 100%);
+  height: 92%;
+  border-radius: 22px 22px 0 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: sheet-up 280ms ease-out both;
+}
+.annai-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(43, 42, 51, 0.1);
+}
+.annai-head-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.annai-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--shu);
+  color: var(--washi);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 800;
+  transform: rotate(-4deg);
+}
+.annai-scroll {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 14px 14px 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.annai-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.annai-row-user {
+  flex-direction: row-reverse;
+}
+.annai-mini-avatar {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  background: var(--shu);
+  color: var(--washi);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+}
+.annai-bubble-wrap {
+  max-width: 78%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.annai-row-user .annai-bubble-wrap {
+  align-items: flex-end;
+}
+.annai-bubble {
+  text-align: left;
+  padding: 10px 13px;
+  border-radius: 16px;
+  font-size: 14.5px;
+  line-height: 1.4;
+  border: none;
+  font-family: var(--font-body);
+}
+.annai-bubble-assistant {
+  background: rgba(243, 236, 218, 0.92);
+  color: var(--sumi);
+  border-bottom-left-radius: 5px;
+}
+.annai-bubble-user {
+  background: var(--sumi);
+  color: var(--washi);
+  border-bottom-right-radius: 5px;
+}
+.annai-bubble.failed {
+  outline: 2px solid var(--shu);
+}
+.annai-retry {
+  color: var(--shu);
+  opacity: 0.9;
+}
+.annai-typing {
+  display: inline-flex;
+  gap: 4px;
+  padding: 2px 0;
+}
+.annai-typing i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--sumi-soft);
+  animation: annai-blink 1.2s infinite ease-in-out;
+}
+.annai-typing i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.annai-typing i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@keyframes annai-blink {
+  0%, 80%, 100% { opacity: 0.25; }
+  40% { opacity: 1; }
+}
+
+/* Inline action confirmation chip (stamp) */
+.annai-action-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+  padding: 7px 12px;
+  border-radius: 12px;
+  background: rgba(123, 160, 91, 0.18);
+  border: 1px solid var(--matcha);
+  color: var(--sumi);
+  font-size: 13px;
+  font-weight: 600;
+}
+.annai-action-seal {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--shu);
+  color: var(--washi);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.annai-suggestions {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 8px 14px;
+  -webkit-overflow-scrolling: touch;
+}
+.annai-sug {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  border: 1px solid rgba(43, 42, 51, 0.15);
+  color: var(--sumi);
+  white-space: nowrap;
+}
+.annai-input-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px calc(var(--safe-bottom) + 12px);
+  border-radius: 0;
+  border-top: 1px solid rgba(43, 42, 51, 0.1);
+}
+.annai-input {
+  flex: 1;
+  font-family: var(--font-body);
+  font-size: 15px;
+  padding: 11px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(43, 42, 51, 0.18);
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--sumi);
+}
+.annai-send {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: var(--shu);
+  color: var(--washi);
+  font-size: 18px;
+  display: grid;
+  place-items: center;
+}
+.annai-send:disabled {
+  opacity: 0.45;
+}
+
+/* ---- Reminder banner ---- */
+.reminder-banner {
+  position: fixed;
+  top: calc(var(--safe-top) + var(--ribbon-h) + 8px);
+  left: 12px;
+  right: 12px;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  animation: reminder-slide 320ms ease-out both;
+}
+@keyframes reminder-slide {
+  from { transform: translateY(-16px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+.reminder-hanko {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--shu);
+  color: var(--washi);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-weight: 800;
+}
+.reminder-text {
+  flex: 1;
+  line-height: 1.35;
+}
+.reminder-log {
+  flex: 0 0 auto;
+  border: none;
+  background: var(--matcha);
+  color: var(--washi);
+  font-weight: 700;
+  padding: 7px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+}
+.reminder-x {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--washi);
+  font-size: 16px;
+  opacity: 0.8;
+}
+
+/* ---- Shared error surface (glass popup) ---- */
+.error-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(43, 42, 51, 0.32);
+  backdrop-filter: blur(2px);
+  animation: toast-in 160ms ease-out both;
+}
+.error-popup {
+  width: min(400px, 100%);
+  padding: 20px;
+  border-radius: 18px;
+  text-align: center;
+}
+.error-seal {
+  width: 46px;
+  height: 46px;
+  margin: 0 auto 10px;
+  border-radius: 12px;
+  background: var(--shu);
+  color: var(--washi);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 26px;
+  font-weight: 800;
+  transform: rotate(-4deg);
+}
+.error-message {
+  font-size: 15px;
+  line-height: 1.4;
+  color: var(--sumi);
+}
+
+/* ---- Crash screen (error boundary) ---- */
+.crash-screen {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(120% 80% at 50% 0%, rgba(199, 62, 58, 0.14), transparent 60%),
+    var(--washi);
+}
+.crash-card {
+  width: min(400px, 100%);
+  padding: 26px;
+  border-radius: 20px;
+  text-align: center;
+}
+
+/* ---- Checkpoint keeper (関 admin) ---- */
+
+/* Entry card on the Tegata permit */
+.keeper-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  text-align: left;
+}
+.keeper-badge {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--shu);
+  color: var(--washi);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 800;
+  transform: rotate(-4deg);
+}
+.keeper-card-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+.keeper-chevron {
+  flex: 0 0 auto;
+  font-size: 26px;
+  color: var(--sumi-soft);
+  line-height: 1;
+}
+
+/* Full-height overlay — mirrors the Annai sheet */
+.keeper-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(43, 42, 51, 0.28);
+  backdrop-filter: blur(2px);
+}
+.keeper-sheet {
+  width: min(520px, 100%);
+  height: 92%;
+  border-radius: 22px 22px 0 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: sheet-up 280ms ease-out both;
+}
+.keeper-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-bottom: 1px solid rgba(43, 42, 51, 0.1);
+}
+.keeper-head-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.keeper-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: var(--shu);
+  color: var(--washi);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 800;
+  transform: rotate(-4deg);
+}
+.keeper-head .capture-x {
+  color: var(--sumi);
+}
+
+/* Glass-pill tabs */
+.keeper-tabs {
+  display: flex;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(43, 42, 51, 0.08);
+}
+.keeper-tab {
+  flex: 1;
+  padding: 9px 10px;
+  border-radius: 999px;
+  font-family: var(--font-body);
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--sumi-soft);
+  background: rgba(255, 255, 255, 0.35);
+  border: 1px solid rgba(43, 42, 51, 0.12);
+  transition: background 140ms ease, color 140ms ease;
+}
+.keeper-tab.active {
+  background: var(--shu);
+  color: var(--washi);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+.keeper-scroll {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 16px 16px calc(var(--safe-bottom) + 20px);
+}
+
+/* Pair tab */
+.keeper-pair {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.keeper-qr-card {
+  /* White-boosted so the QR always scans, in light or dark. */
+  background: #ffffff;
+  padding: 14px;
+  border-radius: 18px;
+  box-shadow: 0 8px 24px rgba(43, 42, 51, 0.18);
+}
+.keeper-qr {
+  display: block;
+  width: 200px;
+  height: 200px;
+  image-rendering: pixelated;
+}
+.keeper-token-label {
+  margin-top: 14px;
+}
+.keeper-token {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: var(--sumi);
+}
+.keeper-countdown {
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--matcha);
+  font-weight: 700;
+}
+.keeper-countdown.expired {
+  color: var(--shu);
+}
+
+/* Shared list rows */
+.keeper-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.keeper-user-row,
+.keeper-device-row,
+.keeper-meal-row,
+.keeper-backend-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+}
+.keeper-backend-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.keeper-backend-row.active {
+  border-color: var(--matcha);
+  box-shadow: 0 0 0 1px var(--matcha);
+}
+.keeper-user-name {
+  font-weight: 700;
+  color: var(--sumi);
+}
+.keeper-active-mark {
+  flex: 0 0 auto;
+  color: var(--matcha);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+/* Mini journey bar */
+.kp-mini {
+  position: relative;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(43, 42, 51, 0.14);
+  overflow: hidden;
+  margin-top: 8px;
+}
+.kp-mini-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--sakura-deep);
+  border-radius: 999px;
+  transition: width 500ms cubic-bezier(0.22, 0.9, 0.31, 1);
+}
+.kp-mini-over {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--shu);
+  border-radius: 999px;
+}
+
+/* Compact + danger buttons (revoke confirm) */
+.btn-sm {
+  padding: 7px 12px;
+  font-size: 13px;
+  border-radius: 10px;
+}
+.btn-danger {
+  background: var(--shu);
+  color: var(--washi);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+/* Checkpoint chips + public URL */
+.keeper-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.keeper-chip {
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sumi);
+  background: rgba(255, 255, 255, 0.4);
+  border: 1px solid rgba(43, 42, 51, 0.14);
+}
+.keeper-url {
+  font-family: var(--font-display);
+  font-size: 15px;
+  color: var(--sumi);
+  word-break: break-all;
+  user-select: all;
+}
+
+/* Drill-down */
+.keeper-back {
+  border: none;
+  background: transparent;
+  color: var(--shu);
+  font-weight: 700;
+  font-size: 14px;
+  padding: 2px 0;
+}
+
+/* ---- Dōjō workout timer (type picker · live dock · summary) ---- */
+
+.dojo-type-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+  gap: 8px;
+}
+.dojo-type {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 10px 6px;
+  border-radius: 12px;
+  border: 1px solid rgba(43, 42, 51, 0.14);
+  background: rgba(255, 255, 255, 0.4);
+  color: var(--sumi);
+  cursor: pointer;
+  transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+}
+.dojo-type.active {
+  border-color: var(--matcha);
+  background: rgba(123, 160, 91, 0.16);
+  box-shadow: 0 0 0 1px var(--matcha);
+}
+.dojo-type-kanji {
+  font-family: var(--font-display);
+  font-size: 22px;
+  line-height: 1;
+}
+.dojo-type-name {
+  font-size: 13px;
+  font-weight: 700;
+}
+.dojo-type-met {
+  font-size: 11px;
+}
+
+.dojo-dock {
+  text-align: center;
+}
+.dojo-dock-type {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-weight: 700;
+  color: var(--sumi);
+}
+.dojo-live-dot,
+.timer-pill-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--shu);
+  animation: dojo-pulse 1.2s ease-in-out infinite;
+}
+@keyframes dojo-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.8); }
+}
+.dojo-dock-time {
+  font-family: var(--font-display);
+  font-size: 46px;
+  line-height: 1.1;
+  margin: 6px 0 2px;
+}
+.dojo-dock-kcal {
+  font-size: 18px;
+  color: var(--matcha);
+  font-weight: 700;
+}
+
+.dojo-summary-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+}
+.dojo-summary-grid .k {
+  font-size: 12px;
+  color: var(--muted, #6b6a73);
+}
+.dojo-summary-grid .v {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+/* Floating timer pill (every screen except Dōjō) */
+.timer-pill {
+  position: fixed;
+  left: 16px;
+  bottom: calc(var(--safe-bottom) + 18px);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  cursor: pointer;
+  animation: reminder-slide 260ms ease-out both;
+}
+.timer-pill-type {
+  font-weight: 700;
+  font-size: 13px;
+}
+.timer-pill-time {
+  font-family: var(--font-display);
+  font-size: 15px;
+}
