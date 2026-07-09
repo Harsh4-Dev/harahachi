@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Start the Cloudflare tunnel inside the container and print the public URL.
+# Quick tunnel by default; a NAMED tunnel when TUNNEL_TOKEN is set. Re-run safe.
+set -euo pipefail
+
+PUBLIC_URL_FILE="${SEKISHO_TUNNEL_URL_FILE:-/tmp/sekisho_public_url}"
+NGINX_PORT="${NGINX_PORT:-80}"
+LOG=/tmp/cloudflared.log
+
+if pgrep -x cloudflared >/dev/null 2>&1; then
+  echo "[start-tunnel] cloudflared already running — $(cat "$PUBLIC_URL_FILE" 2>/dev/null || echo 'URL pending, check '"$LOG")"
+  exit 0
+fi
+
+: > "$LOG"
+if [ -n "${TUNNEL_TOKEN:-}" ]; then
+  nohup cloudflared tunnel --no-autoupdate run --token "$TUNNEL_TOKEN" >>"$LOG" 2>&1 &
+  echo "[start-tunnel] NAMED tunnel starting (log: $LOG)"
+  if [ -n "${SEKISHO_PUBLIC_URL:-}" ]; then
+    echo "${SEKISHO_PUBLIC_URL%/}" > "$PUBLIC_URL_FILE"
+    echo "[start-tunnel] public URL: ${SEKISHO_PUBLIC_URL%/}"
+  else
+    echo "[start-tunnel] set SEKISHO_PUBLIC_URL=<your tunnel hostname> so the pairing QR uses it."
+  fi
+  exit 0
+fi
+
+nohup cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:${NGINX_PORT}" >>"$LOG" 2>&1 &
+echo "[start-tunnel] quick tunnel starting, waiting for the URL..."
+for _ in $(seq 1 60); do
+  url="$(grep -Eo 'https://[a-zA-Z0-9.-]+\.trycloudflare\.com' "$LOG" 2>/dev/null | head -n1 || true)"
+  if [ -n "$url" ]; then
+    echo "$url" > "$PUBLIC_URL_FILE"
+    echo ""
+    echo "==================================================================="
+    echo "  関所 Sekisho is live at:  $url"
+    echo "  Phone: open it anywhere, install, pair via ${url}/admin"
+    echo "==================================================================="
+    exit 0
+  fi
+  sleep 1
+done
+echo "[start-tunnel] WARNING: no URL after 60s — check $LOG"
+exit 1

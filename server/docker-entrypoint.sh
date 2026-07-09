@@ -15,6 +15,24 @@
 #   off                  : no tunnel; reach the app over LAN at http://<ip>/.
 set -euo pipefail
 
+# --- Manual / passthrough modes --------------------------------------------- #
+# `docker run ... harahachi bash` (any args) -> just exec them (interactive).
+# `docker run -e MANUAL=1 ...`               -> idle so you can `docker exec`
+#   in and drive things yourself with: start-server, start-tunnel, hh-status,
+#   stop-all. Nothing starts automatically in manual mode.
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+if [ "${MANUAL:-0}" = "1" ]; then
+  echo "[entrypoint] MANUAL mode — nothing started. Exec in and drive it:"
+  echo "    docker exec -it <container> bash"
+  echo "    start-server     # sekisho + nginx"
+  echo "    start-tunnel     # cloudflare tunnel (prints the public URL)"
+  echo "    hh-status        # what's running + the URL"
+  echo "    stop-all         # stop everything"
+  exec sleep infinity
+fi
+
 # All runtime scratch lives under /tmp so the container can run as a NON-root
 # USER with no writes to /run or /var — no host-permission assumptions.
 PUBLIC_URL_FILE="${SEKISHO_TUNNEL_URL_FILE:-/tmp/sekisho_public_url}"

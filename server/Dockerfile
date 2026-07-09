@@ -27,7 +27,7 @@ ENV PYTHONUNBUFFERED=1 \
 # USER (CAP_NET_BIND_SERVICE), keeping the container rootless with no host caps.
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends nginx curl ca-certificates libcap2-bin; \
+    apt-get install -y --no-install-recommends nginx curl ca-certificates libcap2-bin procps; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
         amd64) cf_arch=amd64 ;; \
@@ -54,7 +54,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY server/sekisho ./sekisho
 COPY server/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY server/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# Manual-mode helpers: exec into the container (docker exec -it <name> bash)
+# and drive it yourself with start-server / start-tunnel / hh-status / stop-all.
+COPY server/docker/start-server server/docker/start-tunnel \
+     server/docker/hh-status server/docker/stop-all /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+             /usr/local/bin/start-server /usr/local/bin/start-tunnel \
+             /usr/local/bin/hh-status /usr/local/bin/stop-all
 
 # --- The built phone PWA (run `npm run build` in app/ first) --------------- #
 # Copied from the repo-root build context into nginx's web root.

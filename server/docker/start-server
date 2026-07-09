@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Start sekisho (uvicorn) + nginx inside the container, then return to the
+# shell. Safe to re-run: skips anything already running. Logs -> /tmp/*.log
+set -euo pipefail
+
+export SEKISHO_HOST=127.0.0.1
+export SEKISHO_PORT="${SEKISHO_PORT:-8420}"
+NGINX_PORT="${NGINX_PORT:-80}"
+cd /app
+
+if pgrep -f "python -m sekisho" >/dev/null 2>&1; then
+  echo "[start-server] sekisho already running on 127.0.0.1:${SEKISHO_PORT}"
+else
+  nohup python -m sekisho >/tmp/sekisho.log 2>&1 &
+  echo "[start-server] sekisho starting on 127.0.0.1:${SEKISHO_PORT}  (log: /tmp/sekisho.log)"
+fi
+
+# Wait for uvicorn to accept connections before starting nginx.
+for _ in $(seq 1 60); do
+  if python -c "import socket,sys; s=socket.socket(); s.settimeout(0.5);
+sys.exit(0 if s.connect_ex(('127.0.0.1', int('${SEKISHO_PORT}')))==0 else 1)" 2>/dev/null; then
+    break
+  fi
+  sleep 0.5
+done
+
+mkdir -p /tmp/nginx/client_body /tmp/nginx/proxy /tmp/nginx/fastcgi \
+         /tmp/nginx/uwsgi /tmp/nginx/scgi
+sed -e "s/__NGINX_PORT__/${NGINX_PORT}/g" \
+    -e "s/__SEKISHO_PORT__/${SEKISHO_PORT}/g" \
+    /etc/nginx/nginx.conf > /tmp/nginx.conf
+
+if pgrep -x nginx >/dev/null 2>&1; then
+  echo "[start-server] nginx already running on :${NGINX_PORT}"
+else
+  nginx -c /tmp/nginx.conf   # daemonizes by itself in manual mode
+  echo "[start-server] nginx up on :${NGINX_PORT} (serving /srv/app, proxying /api -> 127.0.0.1:${SEKISHO_PORT})"
+fi
+
+echo "[start-server] done — admin password is in /tmp/sekisho.log (grep -i password /tmp/sekisho.log)"

@@ -219,3 +219,54 @@ Adminship is **not** granted automatically to the first user. Grant it either:
 - **Reminders not firing** — check the admin **Status** page scheduler card
   (last tick / next fire / VAPID status) and confirm the phone granted
   notification permission and subscribed.
+
+---
+
+## Manual mode — drive the container yourself
+
+Prefer to start things by hand (or debug inside the box)? Run the container
+idle, exec in, and use the built-in commands:
+
+```bash
+# 1. Start it idle (nothing runs yet). Pick any host port you like (8080 here).
+docker run -d --name hh -e MANUAL=1 -p 8080:80 -v hh-data:/data harahachi
+
+# 2. Go inside
+docker exec -it hh bash
+
+# 3. Drive it (inside the container)
+start-server      # starts sekisho (uvicorn) + nginx  → logs in /tmp/sekisho.log
+start-tunnel      # starts the Cloudflare tunnel and PRINTS the public URL
+hh-status         # what's up/down + the current public URL
+stop-all          # stop tunnel + nginx + sekisho
+grep -i password /tmp/sekisho.log   # the admin password
+exit              # leave the shell; the container keeps idling
+```
+
+Notes:
+- `TUNNEL_TOKEN`/`SEKISHO_PUBLIC_URL`/`NGINX_PORT`/`SEKISHO_ADMIN_PASSWORD`
+  envs all work in manual mode too — set them on `docker run`.
+- `docker run -it --rm -p 8080:80 -v hh-data:/data harahachi bash` also drops
+  you straight into a shell (one-off, removed on exit).
+- Automatic mode is unchanged: `docker run` without `MANUAL=1` supervises
+  everything and exits if any process dies (pair with `--restart unless-stopped`).
+
+## Docker cheat-sheet
+
+```bash
+docker build -f server/Dockerfile -t harahachi .   # build (repo root!)
+docker run -d --name hh --restart unless-stopped \
+  -p 8080:80 -v hh-data:/data harahachi            # run (auto mode)
+docker logs -f hh                                  # watch logs / find the URL + admin password
+docker exec -it hh bash                            # shell inside
+docker exec hh hh-status                           # quick status without a shell
+docker stop hh && docker start hh                  # stop / start (new quick-tunnel URL on start!)
+docker rm -f hh                                    # remove the container (data survives in the volume)
+docker volume inspect hh-data                      # where your data lives
+docker volume rm hh-data                           # FULL RESET — erases all users/meals
+docker cp hh:/tmp/sekisho.log ./sekisho.log        # pull a log out
+git pull && cd app && npm run build && cd .. \
+  && docker build -f server/Dockerfile -t harahachi . \
+  && docker rm -f hh && docker run -d --name hh --restart unless-stopped \
+     -p 8080:80 -v hh-data:/data harahachi          # update flow
+```

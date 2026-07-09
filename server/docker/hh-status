@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# One-glance status of everything inside the container.
+set -uo pipefail
+PUBLIC_URL_FILE="${SEKISHO_TUNNEL_URL_FILE:-/tmp/sekisho_public_url}"
+
+up() { pgrep -f "$1" >/dev/null 2>&1 && echo "up" || echo "DOWN"; }
+echo "sekisho (uvicorn) : $(up 'python -m sekisho')   127.0.0.1:${SEKISHO_PORT:-8420}"
+echo "nginx             : $(pgrep -x nginx >/dev/null 2>&1 && echo up || echo DOWN)   :${NGINX_PORT:-80}"
+echo "cloudflared       : $(pgrep -x cloudflared >/dev/null 2>&1 && echo up || echo DOWN)"
+echo "public URL        : $(cat "$PUBLIC_URL_FILE" 2>/dev/null || echo '(none)')"
+echo "logs              : /tmp/sekisho.log  /tmp/cloudflared.log"

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Stop tunnel + nginx + sekisho inside the container (manual mode).
+set -uo pipefail
+pkill -x cloudflared 2>/dev/null && echo "[stop-all] cloudflared stopped" || echo "[stop-all] cloudflared not running"
+pkill -x nginx 2>/dev/null && echo "[stop-all] nginx stopped" || echo "[stop-all] nginx not running"
+pkill -f "python -m sekisho" 2>/dev/null && echo "[stop-all] sekisho stopped" || echo "[stop-all] sekisho not running"
