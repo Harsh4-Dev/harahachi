@@ -1,19 +1,26 @@
-// Ongoing workout notification for the APK (Capacitor @capacitor/local-
-// notifications). While a workout timer runs, the Android shell shows a
-// persistent notification with the elapsed time so the user can see it with the
-// app closed; we refresh the body periodically (the plugin has no chronometer,
-// so we re-post the same id with an updated "Elapsed mm:ss").
+// Ongoing workout notification for the APK.
 //
-// Web fallback = NONE (documented): browsers get no ongoing notification — the
-// in-app pill + persisted timer state cover the web/PWA case. Every call is
-// guarded by isNativeShell() and wrapped in try/catch so nothing throws on web.
+// PRIMARY (fixes the "static time" bug): the custom WorkoutTimer Capacitor
+// plugin posts an ongoing notification with a native CHRONOMETER (setWhen +
+// setUsesChronometer), so Android ticks the elapsed time itself — no JS timer,
+// works while the app is backgrounded/killed. It also carries Pause + Stop
+// action buttons.
+//
+// FALLBACK (plugin not compiled in yet, e.g. before the Android Studio build):
+// @capacitor/local-notifications with a start-time line ("since 6:42 pm"). This
+// does NOT tick — it is the honest plugin-API-only approximation, re-posted on
+// app resume. Documented so we never silently ship the broken ticking.
+//
+// WEB/PWA: no-op (the in-app pill + persisted timer state cover it) — unchanged.
 
 import { LocalNotifications } from '@capacitor/local-notifications';
 import { isNativeShell } from '../api/storage';
-import { formatElapsed, type WorkoutType } from '../lib/workouts';
+import { WorkoutTimer } from '../lib/workoutTimerPlugin';
+import type { WorkoutType } from '../lib/workouts';
 
 const NOTIF_ID = 8080; // stable id so updates replace, not stack
 
+let pluginOk = true; // flips false once we learn the custom plugin isn't present
 let permissionAsked = false;
 
 async function ensurePermission(): Promise<boolean> {
@@ -29,9 +36,35 @@ async function ensurePermission(): Promise<boolean> {
   }
 }
 
-// Show or update the ongoing notification. Safe to call repeatedly (same id).
-export async function showWorkoutNotification(type: WorkoutType, elapsedSec: number): Promise<void> {
-  if (!isNativeShell()) return; // web: no-op (documented fallback)
+function startTimeText(startEpoch: number): string {
+  try {
+    return new Date(startEpoch).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+}
+
+// Start (or re-assert) the ongoing notification. `startEpoch` (ms) is the wall
+// clock the timer began at, so the chronometer counts from the true start even
+// after a background/kill.
+export async function startWorkoutNotification(type: WorkoutType, startEpoch: number): Promise<void> {
+  if (!isNativeShell()) return; // web: no-op (documented)
+
+  if (pluginOk) {
+    try {
+      await WorkoutTimer.start({
+        startEpoch,
+        title: `Harahachi · ${type} 道場`,
+        text: 'Workout in progress',
+      });
+      return;
+    } catch {
+      // Custom plugin unavailable → fall through to the local-notifications path.
+      pluginOk = false;
+    }
+  }
+
+  // Fallback: static "since <start time>" (no live tick — approximation).
   try {
     if (!(await ensurePermission())) return;
     await LocalNotifications.schedule({
@@ -39,8 +72,8 @@ export async function showWorkoutNotification(type: WorkoutType, elapsedSec: num
         {
           id: NOTIF_ID,
           title: `Harahachi · ${type} 道場`,
-          body: `Workout in progress — ${formatElapsed(elapsedSec)} elapsed`,
-          ongoing: true, // persistent, not swipe-dismissible (Android)
+          body: `Workout in progress — since ${startTimeText(startEpoch)}`,
+          ongoing: true,
           autoCancel: false,
           smallIcon: 'ic_stat_icon_config_sample',
           schedule: undefined,
@@ -52,8 +85,16 @@ export async function showWorkoutNotification(type: WorkoutType, elapsedSec: num
   }
 }
 
-export async function clearWorkoutNotification(): Promise<void> {
+export async function stopWorkoutNotification(): Promise<void> {
   if (!isNativeShell()) return;
+  if (pluginOk) {
+    try {
+      await WorkoutTimer.stop();
+      return;
+    } catch {
+      pluginOk = false;
+    }
+  }
   try {
     await LocalNotifications.cancel({ notifications: [{ id: NOTIF_ID }] });
   } catch {

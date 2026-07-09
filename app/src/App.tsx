@@ -4,10 +4,10 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { SakuraMap } from './map/SakuraMap';
-import { STATION_T, stationById, type Station, type StationId } from './map/stations';
+import { STATIONS, STATION_T, stationById, type Station, type StationId } from './map/stations';
 import { useApp } from './state/AppContext';
 import { DayProvider, useDay } from './state/useDay';
-import { WorkoutTimerProvider, useWorkoutTimer } from './state/useWorkoutTimer';
+import { WorkoutTimerProvider, useWorkoutTimer, useElapsed } from './state/useWorkoutTimer';
 import { useSwipeDown } from './lib/useSwipeDown';
 import { fmtInt } from './lib/format';
 import { formatElapsed } from './lib/workouts';
@@ -120,8 +120,16 @@ function ErrorPopup() {
 // on mount (and rebinds per station via the parent key). Swipe the grip/header
 // down — or the body when scrolled to the top — past ~80px to close; the ✕ in
 // the ribbon still works too.
-function StationPanel({ st, onClose }: { st: Station; onClose: () => void }) {
-  const sheetRef = useSwipeDown<HTMLElement>(onClose);
+function StationPanel({
+  st,
+  onClose,
+  onNavigate,
+}: {
+  st: Station;
+  onClose: () => void;
+  onNavigate: (dir: 1 | -1) => void;
+}) {
+  const sheetRef = useSwipeDown<HTMLElement>(onClose, onNavigate);
   return (
     <section ref={sheetRef} className="panel glass" aria-label={`${st.name} station`}>
       <div className="panel-grip" data-swipe-handle />
@@ -152,12 +160,13 @@ function MapShell() {
 // timer is active; tap to jump to Dōjō (where the timer docks instead).
 function TimerPill({ active, onJump }: { active: StationId | null; onJump: () => void }) {
   const timer = useWorkoutTimer();
+  const { elapsedSec } = useElapsed();
   if (timer.phase === 'idle' || active === 'dojo' || timer.type == null) return null;
   return (
-    <button className="timer-pill glass-ink" onClick={onJump} aria-label={`${timer.type} workout, ${formatElapsed(timer.elapsedSec)} elapsed — open Dōjō`}>
+    <button className="timer-pill glass-ink" onClick={onJump} aria-label={`${timer.type} workout, ${formatElapsed(elapsedSec)} elapsed — open Dōjō`}>
       <span className="timer-pill-dot" aria-hidden />
       <span className="timer-pill-type">{timer.type}</span>
-      <span className="timer-pill-time tnum">{formatElapsed(timer.elapsedSec)}</span>
+      <span className="timer-pill-time tnum">{formatElapsed(elapsedSec)}</span>
     </button>
   );
 }
@@ -179,6 +188,19 @@ function MapShellInner() {
 
   const frac = `${fmtInt(day.totals.calories)} / ${fmtInt(day.targets.calories)}`;
   const st = active ? stationById(active) : null;
+
+  // Horizontal swipe on an open panel's header steps to the adjacent station in
+  // road order (no wrap). The map pan animates to the new region and the panel
+  // content crossfades via its per-station key remount.
+  const navAdjacent = (dir: 1 | -1) => {
+    setActive((cur) => {
+      if (!cur) return cur;
+      const i = STATIONS.findIndex((s) => s.id === cur);
+      const next = i + dir;
+      if (next < 0 || next >= STATIONS.length) return cur; // no wrap
+      return STATIONS[next].id;
+    });
+  };
 
   return (
     <div className="shell">
@@ -204,7 +226,7 @@ function MapShellInner() {
 
       {!active && <div className="map-hint glass">Tap a seal to travel there</div>}
 
-      {st && <StationPanel key={st.id} st={st} onClose={() => setActive(null)} />}
+      {st && <StationPanel key={st.id} st={st} onClose={() => setActive(null)} onNavigate={navAdjacent} />}
 
       {/* Annai chat — floating above the map and inside panels; a logged action
           refreshes today's data so the journey bar advances live. */}

@@ -11,7 +11,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { JourneyBar } from '../components/JourneyBar';
 import { useApp } from '../state/AppContext';
 import { useDay } from '../state/useDay';
-import { useWorkoutTimer } from '../state/useWorkoutTimer';
+import { useWorkoutTimer, useElapsed } from '../state/useWorkoutTimer';
 import { WORKOUT_METS, elapsedMinutes, formatElapsed, type WorkoutType } from '../lib/workouts';
 import { fmtInt } from '../lib/format';
 
@@ -19,6 +19,7 @@ export function Dojo() {
   const { client, showError, toast } = useApp();
   const day = useDay();
   const timer = useWorkoutTimer();
+  const { elapsedSec, calories } = useElapsed();
   const [picked, setPicked] = useState<WorkoutType | null>(null);
   const [busy, setBusy] = useState(false);
   const [workouts, setWorkouts] = useState<{ kind: string; minutes: number; calories_burned: number }[]>([]);
@@ -40,8 +41,8 @@ export function Dojo() {
     if (timer.type == null) return;
     setBusy(true);
     const kind = timer.type;
-    const minutes = elapsedMinutes(timer.elapsedSec);
-    const calories_burned = timer.calories;
+    const minutes = elapsedMinutes(elapsedSec);
+    const calories_burned = calories;
     try {
       await client.logWorkout({ kind, minutes, calories_burned });
       toast(`+${fmtInt(calories_burned)} kcal — the road stretches further.`, 'ok');
@@ -99,9 +100,9 @@ export function Dojo() {
           <div className="dojo-dock-type">
             <span className="dojo-live-dot" aria-hidden /> {timer.type} · in progress
           </div>
-          <div className="dojo-dock-time tnum">{formatElapsed(timer.elapsedSec)}</div>
+          <div className="dojo-dock-time tnum">{formatElapsed(elapsedSec)}</div>
           <div className="dojo-dock-kcal tnum">
-            {fmtInt(timer.calories)} <span className="small muted">kcal burned</span>
+            {fmtInt(calories)} <span className="small muted">kcal burned</span>
           </div>
           <button className="btn btn-danger" style={{ width: '100%', marginTop: 12 }} onClick={timer.stop}>
             Stop
@@ -119,15 +120,15 @@ export function Dojo() {
             </div>
             <div>
               <div className="k">Time</div>
-              <div className="v tnum">{formatElapsed(timer.elapsedSec)}</div>
+              <div className="v tnum">{formatElapsed(elapsedSec)}</div>
             </div>
             <div>
               <div className="k">Minutes</div>
-              <div className="v tnum">{elapsedMinutes(timer.elapsedSec)}</div>
+              <div className="v tnum">{elapsedMinutes(elapsedSec)}</div>
             </div>
             <div>
               <div className="k">Burned</div>
-              <div className="v tnum">{fmtInt(timer.calories)} kcal</div>
+              <div className="v tnum">{fmtInt(calories)} kcal</div>
             </div>
           </div>
           <div className="row between" style={{ marginTop: 14 }}>

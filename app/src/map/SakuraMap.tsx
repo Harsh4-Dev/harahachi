@@ -4,8 +4,33 @@
 // hanko-seal stations, burnt parchment edges, and a traveler marker that walks
 // the road via getPointAtLength. Tapping a seal zooms deep into its region.
 
-import { memo, useEffect, useMemo, useRef } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { ROAD_D, STATIONS, type Station, type StationId } from './stations';
+
+// Landscape (aspect > 1) detection. In landscape the 1000×1000 map, sliced to a
+// short-wide viewport, only shows a thin horizontal band — so we bump the base
+// scale and allow a clamped one-finger vertical pan (see below) to keep every
+// station reachable.
+function useLandscape(): boolean {
+  const [land, setLand] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth > window.innerHeight,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia('(orientation: landscape)');
+    const on = () => setLand(window.innerWidth > window.innerHeight);
+    mq.addEventListener('change', on);
+    window.addEventListener('resize', on);
+    return () => {
+      mq.removeEventListener('change', on);
+      window.removeEventListener('resize', on);
+    };
+  }, []);
+  return land;
+}
+
+// Landscape framing constants (SVG user units).
+const LAND_SCALE = 1.2; // fill the short viewport instead of reading tiny/zoomed-out
+const LAND_PAN_RANGE = 260; // ± vertical pan so top (Tegata) & bottom (Honjin) seals are reachable
 
 // Pre-baked 64×64 grayscale+alpha noise tile (base64 PNG). Replaces a
 // full-screen SVG feTurbulence paper-grain filter, which is a heavy per-frame
@@ -402,6 +427,74 @@ const PETALS = [
 function SakuraMapImpl({ active, travelerT, onSelect, reducedMotion }: Props) {
   const roadRef = useRef<SVGPathElement | null>(null);
   const travelerRef = useRef<SVGGElement | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const landscape = useLandscape();
+  const [panY, setPanY] = useState(0);
+  const [panning, setPanning] = useState(false);
+
+  // A station zoom or a return to portrait re-centers the map vertically.
+  useEffect(() => {
+    if (active || !landscape) setPanY(0);
+  }, [active, landscape]);
+
+  // Landscape one-finger vertical pan of the whole map group, clamped to the map
+  // bounds. Only on the full map (no active station) and only when the gesture
+  // starts on the map backdrop — taps on a seal (role="button") still select it.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg || !landscape || active) return;
+    let startY = 0;
+    let base = 0;
+    let dragging = false;
+    let tracking = false;
+
+    const clamp = (v: number) => Math.max(-LAND_PAN_RANGE, Math.min(LAND_PAN_RANGE, v));
+
+    const down = (t: Touch, target: EventTarget | null) => {
+      const el = target as HTMLElement | null;
+      if (el && el.closest('[role="button"]')) return; // let seal taps through
+      tracking = true;
+      dragging = false;
+      startY = t.clientY;
+      setPanY((p) => {
+        base = p;
+        return p;
+      });
+    };
+    const onStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return;
+      down(e.touches[0], e.target);
+    };
+    const onMove = (e: TouchEvent) => {
+      if (!tracking || e.touches.length !== 1) return;
+      const dy = e.touches[0].clientY - startY;
+      if (!dragging) {
+        if (Math.abs(dy) < 8) return;
+        dragging = true;
+        setPanning(true);
+      }
+      // clientY px ≈ user units × (viewport height / visible band); a 1:1 feel is
+      // close enough and stays clamped, so map px→user scaling is not critical.
+      setPanY(clamp(base + dy));
+      if (e.cancelable) e.preventDefault();
+    };
+    const onEnd = () => {
+      tracking = false;
+      if (dragging) setPanning(false);
+      dragging = false;
+    };
+
+    svg.addEventListener('touchstart', onStart, { passive: true });
+    svg.addEventListener('touchmove', onMove, { passive: false });
+    svg.addEventListener('touchend', onEnd);
+    svg.addEventListener('touchcancel', onEnd);
+    return () => {
+      svg.removeEventListener('touchstart', onStart);
+      svg.removeEventListener('touchmove', onMove);
+      svg.removeEventListener('touchend', onEnd);
+      svg.removeEventListener('touchcancel', onEnd);
+    };
+  }, [landscape, active]);
 
   // Move the traveler along the road whenever progress changes.
   useEffect(() => {
@@ -417,7 +510,16 @@ function SakuraMapImpl({ active, travelerT, onSelect, reducedMotion }: Props) {
   // zone on a game world map. The region centers in the map area left visible
   // above the glass panel.
   const groupTransform = useMemo(() => {
-    if (!active) return 'translate(0 0) scale(1)';
+    if (!active) {
+      if (landscape) {
+        // Bump the base scale so the continent fills the short viewport, keep it
+        // horizontally centred, and apply the clamped vertical pan.
+        const tx = 500 * (1 - LAND_SCALE);
+        const ty = 500 * (1 - LAND_SCALE) + panY;
+        return `translate(${tx} ${ty}) scale(${LAND_SCALE})`;
+      }
+      return 'translate(0 0) scale(1)';
+    }
     const st = STATIONS.find((s) => s.id === active)!;
     const scale = 2.4;
     // Land the seal in the map strip left visible above the glass panel
@@ -425,10 +527,11 @@ function SakuraMapImpl({ active, travelerT, onSelect, reducedMotion }: Props) {
     const tx = 500 - st.x * scale;
     const ty = 140 - st.y * scale;
     return `translate(${tx} ${ty}) scale(${scale})`;
-  }, [active]);
+  }, [active, landscape, panY]);
 
   return (
     <svg
+      ref={svgRef}
       className="map-svg"
       viewBox="0 0 1000 1000"
       preserveAspectRatio="xMidYMid slice"
@@ -468,7 +571,7 @@ function SakuraMapImpl({ active, travelerT, onSelect, reducedMotion }: Props) {
 
       {/* Everything that pans/zooms lives in this group */}
       <g
-        className={reducedMotion ? 'map-group no-anim' : 'map-group'}
+        className={reducedMotion || panning ? 'map-group no-anim' : 'map-group'}
         transform={groupTransform}
       >
         {/* Coastal glow: turquoise bands stepping from deep sea to shore,

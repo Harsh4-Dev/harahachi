@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- allowBackup=false: Android Auto Backup was restoring the WebView's
+         localStorage on reinstall, bringing back a prior "try demo" session
+         (hh.demo=1 / hh.onboarded=1) so a "fresh install" skipped straight to the
+         map. Disabling backup guarantees a genuinely clean first run. -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -27,6 +32,11 @@
             android:grantUriPermissions="true">
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
         </provider>
+
+        <!-- Pause/Stop taps from the ongoing workout-timer notification. -->
+        <receiver
+            android:name=".WorkoutTimerActionReceiver"
+            android:exported="false" />
     </application>
 
     <!-- Permissions -->
