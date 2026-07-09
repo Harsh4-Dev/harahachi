@@ -2,108 +2,137 @@
 
 > *Hara hachi bu* — eat until you are eight-tenths full.
 
-Harahachi is a two-part system:
+Point your phone at your plate. A vision LLM reads the dish — **itemized, with
+each component labelled around the food** (dal · rice · roti ×2 · curd), asks
+one clarifying question when it matters ("ghee on the rotis?"), and one hanko
+stamp logs it against your day. Your daily calorie goal is a journey across an
+old Japanese sakura map: every meal walks your traveler down the road; workouts
+extend it; eight-tenths full lands you at the destination station.
 
-| Part | Codename | What it is | Where it runs |
-|------|----------|-----------|---------------|
-| `server/` | **Sekisho (関所)** | FastAPI edge-AI gateway: device pairing, auth, rate limiting, vLLM vision proxy, admin dashboard | Laptop / lab server (college network) |
-| `app/` | **Harahachi (腹八分)** | Installable PWA calorie tracker, styled as a journey across an old Japanese sakura map | Phone (browser → home screen) |
+Self-hosted, private, and free: your data lives on **your** machine, the AI is
+**your** vLLM / LM Studio / NVIDIA API endpoint (or a built-in mock so
+everything works with no GPU at all), and the phone connects from anywhere in
+the world through an outbound-only Cloudflare tunnel.
 
-## The improved brief (what we're building)
+---
 
-**Core loop:** the user photographs their dish → the phone sends it to Sekisho →
-Sekisho forwards to a vLLM vision model (or mock) → structured JSON comes back
-(dish name, calories, protein/carbs/fat, confidence, clarifying question if
-unsure) → a glass confirmation card appears → on confirm, the day's intake
-updates and the traveler marker advances along the map road.
+## The two halves
 
-**Onboarding (one-time, fun):** framed as obtaining your *tegata* (Edo travel
-permit) at the checkpoint — a short scroll-style flow collecting age, sex,
-height, weight, activity level, and goal (cut / maintain / bulk). Computes
-BMR/TDEE (Mifflin-St Jeor) and sets the daily calorie + macro targets. A hanko
-seal stamp animation completes it. Editable later at the Tegata station.
+| Part | Codename | What it is | Runs on |
+|------|----------|-----------|---------|
+| `app/` | **Harahachi (腹八分)** | Mobile app — installable PWA + Capacitor Android APK. Ukiyo-e game-map navigation, glassmorphism UI, full offline queue | Your phone |
+| `server/` | **Sekisho (関所)** | FastAPI edge-AI gateway: device pairing, accounts, multi-LLM backend registry with failover, push reminders, full admin dashboard | Laptop / home server / DGX — one Docker container |
 
-**Daily journey:** calorie goal = one day's walk between two stations on the
-road. Meals move the traveler forward; hitting 100% arrives at the destination;
-overshoot walks past it into a vermillion "overshoot" stretch. Macro bars
-(protein/carbs/fat) render as three smaller parallel paths.
+## Features
 
-**Intelligence:** analyses the user's history to suggest meals *they've eaten
-before* that fit the remaining calories/macros for today ("From your past
-travels: dal + roti fits your remaining 620 kcal and 32g protein").
+**Logging**
+- 📷 **Camera dish analysis** — full-screen capture; the LLM response *surrounds*
+  the food: one glass chip per component pinned to its spot with a leader line,
+  portion cycling (×0.5–×2), a clarifying-question chip, total bar + stamp
+- 🏷 **Barcode scanner** — packaged food via OpenFoodFacts (server-proxied + cached)
+- ✍️ Manual entry, one-tap **quick-log** of your regulars (favorites + frequency-ranked recents)
+- 💬 **Annai (案内人) chat** — "I ate 2 idlis and sambar" logs it; "what should I
+  eat tonight?" *proposes* (confirm chip — never logs without your stamp);
+  answers "what's left today?" and app-help questions
 
-**Other stations:** calendar heat-history (Koyomi), gym/fitness logging with
-calorie burn credited back to the journey (Dōjō), a store (Ichiba) with merch
-placeholders and healthy-option deep links to Swiggy/Zomato/Google Maps search.
+**The feedback loop**
+- ⚖️ Weight log with 7-day trend chart, goal weight + weekly pace →
+  **calorie target computed from your pace** (Katch-McArdle when body-fat is
+  known) with an arrival date
+- 🔥 **Streaks & the goshuin stamp book** — a red temple stamp per on-target
+  day, gold milestones at 7/30
+- 📊 Weekly insights: averages, adherence %, best/worst day, macro split, and a
+  summary written in Annai's voice
+- 💧 Water tracking with reminders; fiber/sugar/sodium behind a "more" tap
+- 🏋️ **Workout timer** — pick the type (MET-based, calories computed live), timer
+  docks under the calorie ribbon Dynamic-Island style, and in the APK an
+  **Android chronometer notification** keeps ticking with Pause/Stop buttons
+  even when the app is closed
+- ⏰ Push reminders (6 pm goal nudge with a meal *you actually eat*, 3 pm water,
+  10 pm recap) — web push on PWA, in-app banners in the APK
 
-## Deployment: ONE Docker container + Cloudflare Tunnel (works anywhere)
+**Body & accounts**
+- 🧍 Body-fat via sumi-line **silhouette picker** (current + goal) or a photo the
+  LLM estimates from (editable result, photo never stored)
+- 👥 Multi-user accounts (username + PIN, per-user data isolation), logout/switch
+- 🗝 **Checkpoint keeper** — in-app admin mode: pair new phones by showing a QR
+  from *your* phone, see everyone's day/streaks, revoke devices, switch AI
+  backends. Server-enforced, granted only via the dashboard
 
-The server ships as a **single image** (no compose) that runs everything,
-supervised by an entrypoint:
+**The world**
+- 🗾 Dense ukiyo-e map: ink mountains, pine forests, villages, temples, torii,
+  province borders, deep indigo sea with coastal banding, drifting petals,
+  cartouche — all inline SVG in one palette
+- 🧭 No tab bar: tap a hanko seal to zoom into its region; swipe down to close
+  (1:1 finger tracking, flick to dismiss), swipe the header to the next station
+- 🌸 Sakura-petal loaders, user-adjustable glassmorphism transparency
 
-| Process inside the container | Bind | Role |
-|------------------------------|------|------|
-| `uvicorn` (sekisho) | `127.0.0.1:8420` | The FastAPI app — loopback only, never directly reachable |
-| `nginx` | `:80` | Front door: serves the PWA (`/srv/app`, SPA fallback) + proxies `/api/ /pair /admin /llm/` to uvicorn (`client_max_body_size 16m`) |
-| `cloudflared` | outbound | Tunnel exposing `:80` as a public `https://*.trycloudflare.com` URL |
-
-| nginx route | Goes to |
-|-------------|---------|
-| `/` | The Harahachi phone app (COPYed to `/srv/app` at build time, SPA fallback) — an installable PWA with camera access |
-| `/api/`, `/pair/` | Sekisho data + pairing endpoints |
-| `/llm/v1/` | OpenAI-compatible passthrough to vLLM (device-key gated; vLLM never exposed) |
-| `/admin` | Sekisho admin GUI (pairing QR, devices, vLLM status, logs) |
-
-**Connectivity — the tunnel, works from anywhere:** `cloudflared` dials *out* to
-Cloudflare (no router ports, home/college IP never exposed) and gets a public
-`https://<random>.trycloudflare.com` URL, printed prominently in the logs. Open
-it on the phone **anywhere in the world**, "Add to Home Screen" (real Cloudflare
-cert → camera + PWA secure-context work), and pair via `/admin` — **the QR
-encodes the tunnel URL**. LAN/hotspot still works with `TUNNEL=off` via
-`http://<laptop-ip>/`.
-
-## Security model
-
-- Every device gets its own API key, issued by scanning a **pairing QR** shown
-  on the Sekisho admin dashboard. Keys are hashed at rest (SHA-256).
-- All app→server calls send `Authorization: Bearer <device-key>`.
-- Per-device rate limiting; pairing QR codes expire after 5 minutes.
-- vLLM itself is never exposed — only Sekisho talks to it; the `/llm/v1/`
-  passthrough validates the device key, enforces rate limits, caps max_tokens,
-  and pins the model before forwarding.
-- **Outbound-only tunnel** — no inbound ports opened; **Cloudflare terminates
-  TLS** with a real cert (no self-signed warning), so PWA install + camera work
-  out of the box.
-
-## Running it
+## Quick start
 
 ```bash
-# 1. Build the phone app (COPYed into the image at /srv/app).
-cd app && npm install && npm run build
+# 1. Build the phone app (baked into the server image)
+cd app && npm install && npm run build && cd ..
 
-# 2. Build the single image. Build context is the REPO ROOT so app/dist is visible.
-cd ..
+# 2. One container: FastAPI + nginx + Cloudflare tunnel
 docker build -f server/Dockerfile -t harahachi .
-
-# 3. Run it. TUNNEL=cloudflare (default) prints the public https URL in the logs.
-docker run -p 80:80 -v hh-data:/data harahachi
-#   → open the printed https://…trycloudflare.com URL on the phone (anywhere),
-#     install the PWA, then pair at that URL + /admin.
-
-# LAN-only instead of a tunnel (phone on same WiFi/hotspot):
-docker run -p 80:80 -v hh-data:/data \
-  -e TUNNEL=off -e SEKISHO_PUBLIC_URL=http://<laptop-ip> harahachi
-
-# With a host-GPU vLLM backend:
-docker run -p 80:80 -v hh-data:/data \
-  --add-host host.docker.internal:host-gateway \
-  -e SEKISHO_VLLM_URL=http://host.docker.internal:8000/v1 \
-  -e SEKISHO_VLLM_MODEL=Qwen/Qwen2.5-VL-7B-Instruct harahachi
-
-# Dev without Docker
-cd server && pip install -r requirements.txt && python -m sekisho   # :8420
-cd app && npm run dev
+docker run -d --name hh --restart unless-stopped -p 8080:80 -v hh-data:/data harahachi
+docker logs -f hh    # prints your public https://…trycloudflare.com URL + admin password
 ```
 
-See [DESIGN.md](DESIGN.md) for the visual system and [API.md](API.md) for the
-server contract.
+Open the URL on your phone → onboard → scan the pairing QR from `/admin` →
+done. Prefer driving it by hand? `docker run -e MANUAL=1 …`, then
+`docker exec -it hh bash` and use `start-server` / `start-tunnel` / `hh-status`.
+
+**No AI backend?** Everything works in mock mode. **Have one?** Admin →
+Backends → add vLLM / LM Studio / NVIDIA API (presets included), mark it
+vision-capable, set active — with automatic failover.
+
+**Android APK:** `cd app && npm run apk:sync`, open `app/android` in Android
+Studio, Build APK. See [ANDROID.md](ANDROID.md) for the beginner walkthrough.
+
+## Documentation
+
+| Doc | What's in it |
+|-----|--------------|
+| [SETUP.md](SETUP.md) | Step-by-step from zero: server, pairing, phone install, backends, troubleshooting |
+| [ANDROID.md](ANDROID.md) | Android Studio + APK build for beginners (concepts explained) |
+| [DEPLOY_DGX.md](DEPLOY_DGX.md) | Rootless deployment on a shared server (non-root docker user), manual mode, docker cheat-sheet, zip-based deploy without GitHub |
+| [DESIGN.md](DESIGN.md) | The locked design system: palette, glass rules, map art spec, every screen |
+| [API.md](API.md) | The full Sekisho API contract (v1–v3) |
+
+## Architecture
+
+```
+ Phone (PWA / APK)                    Your machine (one container)
+┌─────────────────┐   HTTPS (Cloudflare tunnel,   ┌──────────────────────────┐
+│  Harahachi app   │   outbound-only, no ports    │  nginx :80  ← cloudflared │
+│  camera · chat   │ ───────────────────────────► │    ├─ /        app files  │
+│  offline queue   │   Bearer device key          │    ├─ /api/    sekisho    │
+└─────────────────┘                               │    ├─ /admin   dashboard  │
+                                                  │    └─ /llm/v1  LLM proxy  │
+                                                  │  sekisho (FastAPI, :8420  │
+                                                  │   loopback) → SQLite      │
+                                                  │   └─ backends: vLLM / LM  │
+                                                  │      Studio / NVIDIA API  │
+                                                  └──────────────────────────┘
+```
+
+**Security model:** per-device API keys issued by QR (SHA-256 at rest, 5-min
+single-use pairing tokens), per-device rate limiting, PIN-protected accounts
+with lockout, admin actions server-enforced, the LLM backend never exposed —
+and the tunnel is outbound-only, so no router ports and no exposed home IP.
+
+## Tech stack & testing
+
+React 18 + TypeScript (strict) + Vite + Capacitor 8 · FastAPI + SQLite ·
+nginx + cloudflared in one rootless container (non-root uid, works on shared
+DGX-class hosts) · hand-rolled CSS + inline SVG (no UI framework).
+
+`server/tests_smoke.py` — **152 checks** across every endpoint including
+failure paths (lockout, failover, rate limits, migrations). Run:
+`cd server && python tests_smoke.py`.
+
+## Status & roadmap
+
+Actively developed. Deferred by choice: Google Fit / Apple Health sync
+(needs native plugins), recipe builder, Play Store release signing.
