@@ -270,3 +270,24 @@ git pull && cd app && npm run build && cd .. \
   && docker rm -f hh && docker run -d --name hh --restart unless-stopped \
      -p 8080:80 -v hh-data:/data harahachi          # update flow
 ```
+
+## No GitHub? Deploy by zip
+
+Everything `docker build` needs is `server/`, the pre-built `app/dist/`, and
+the root `.dockerignore`. On the laptop (PowerShell, repo root — rebuild the
+app first if you changed it: `cd app && npm run build`):
+
+The repo ships a ready recipe — or just take the generated `harahachi-deploy.zip`.
+Transfer it (WinSCP / `scp harahachi-deploy.zip user@dgx:~/`), then on the DGX:
+
+```bash
+unzip harahachi-deploy.zip && cd harahachi
+docker build -f server/Dockerfile -t harahachi .
+# ...everything from here is IDENTICAL to the git-clone flow above
+docker run -d --name hh -e MANUAL=1 -p 8080:80 -v hh-data:/data harahachi
+docker exec -it hh bash    # then: start-server / start-tunnel / hh-status
+```
+
+Updating later = make a fresh zip on the laptop, re-upload, unzip over the old
+folder, rebuild the image, `docker rm -f hh` and run again (data survives in
+the `hh-data` volume).
