@@ -20,6 +20,7 @@ import { Tegata } from './stations/Tegata';
 import { Onboarding } from './onboarding/Onboarding';
 import { Pairing } from './onboarding/Pairing';
 import { Account } from './onboarding/Account';
+import { RePair } from './onboarding/RePair';
 import { AnnaiButton } from './chat/Annai';
 import { ReminderBanner } from './push/ReminderBanner';
 
@@ -249,5 +250,6 @@ export function App() {
   if (phase === 'onboarding') return <><Onboarding /><Toasts /><ErrorPopup /></>;
   if (phase === 'pairing') return <><Pairing /><Toasts /><ErrorPopup /></>;
   if (phase === 'login') return <><Account /><Toasts /><ErrorPopup /></>;
+  if (phase === 'repair') return <><RePair /><Toasts /><ErrorPopup /></>;
   return <><MapShell /><ErrorPopup /></>;
 }

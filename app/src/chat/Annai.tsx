@@ -11,6 +11,7 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useApp } from '../state/AppContext';
 import { ApiError } from '../api/http';
+import { AI_COPY, classifyApiError } from '../api/errors';
 import { useSwipeDown } from '../lib/useSwipeDown';
 import type { ChatAction, ChatMessage, MealInput } from '../api/types';
 import { fmtInt } from '../lib/format';
@@ -168,6 +169,7 @@ function AnnaiOverlay({ onClose, onDataChanged }: { onClose: () => void; onDataC
     } catch (e) {
       // Remove the pending assistant bubble; mark the user bubble tap-to-retry.
       const net = e instanceof ApiError && e.status === 0;
+      const kind = classifyApiError(e);
       setBubbles((prev) =>
         prev
           .filter((b) => b.id !== pendingId)
@@ -181,7 +183,11 @@ function AnnaiOverlay({ onClose, onDataChanged }: { onClose: () => void; onDataC
           role: 'assistant',
           content: net
             ? 'Sekisho is unreachable — tap your message to retry.'
-            : 'Something went wrong — tap your message to retry.',
+            : kind === 'daily_cap'
+              ? AI_COPY.daily_cap
+              : kind === 'rate_limited' || kind === 'unavailable'
+                ? 'I can’t answer just now — tap your message to retry in a moment.'
+                : 'Something went wrong — tap your message to retry.',
         },
       ]);
     } finally {

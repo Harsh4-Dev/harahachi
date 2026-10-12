@@ -1,17 +1,18 @@
 """Body-fat estimation from a full-body photo (v2, POST /profile/body-photo).
 
-Asks the active vision backend for a strict-JSON body-fat estimate, validated
-with pydantic. Falls back to a deterministic mock keyed off the image hash so
-the editable result screen always has something to show. The photo is never
+Asks the vision model (NIM ``body`` slot, or the registry's active vision
+backend) for a strict-JSON body-fat estimate, validated with pydantic. Falls
+back to a deterministic mock keyed off the image hash ONLY when mock is allowed
+(Docker/dev default); otherwise raises ``BackendUnavailable`` so the app gets a
+clean 503 and its retry popup instead of a fake number. The photo is never
 stored — only the estimate is returned; the app confirms/edits then saves via
 PUT /profile.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
-
-import httpx
 
 from . import backends
 from .models import BodyPhotoEstimate
@@ -48,11 +49,16 @@ def _mock_estimate(image_bytes: bytes) -> BodyPhotoEstimate:
 
 
 async def estimate(image_bytes: bytes, mime: str) -> tuple[BodyPhotoEstimate, str]:
-    """Return (estimate, source). source is 'vllm' or 'mock'."""
+    """Return (estimate, source). source is 'vllm' or 'mock'.
+
+    Raises backends.BackendUnavailable when the model fails and mock is off.
+    """
+    from .config import config
     if backends.is_configured(need_vision=True):
         try:
-            b64 = base64.b64encode(image_bytes).decode("ascii")
-            data_url = f"data:{mime};base64,{b64}"
+            send_bytes, send_mime = await asyncio.to_thread(backends.prepare_image, image_bytes, mime)
+            b64 = base64.b64encode(send_bytes).decode("ascii")
+            data_url = f"data:{send_mime};base64,{b64}"
             messages = [
                 {"role": "system", "content": BODY_PHOTO_SYSTEM_PROMPT},
                 {"role": "user", "content": [
@@ -61,10 +67,14 @@ async def estimate(image_bytes: bytes, mime: str) -> tuple[BodyPhotoEstimate, st
                 ]},
             ]
             content = await backends.chat_completion(
-                messages, need_vision=True, max_tokens=300, temperature=0.2
+                messages, need_vision=True, max_tokens=300, temperature=0.2,
+                op="analyze", task="body",
             )
             raw = backends._extract_json(content)
             return BodyPhotoEstimate.model_validate(raw), "vllm"
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001
+            if not config.allow_mock:
+                raise backends.BackendUnavailable(str(e)) from e
+    elif not config.allow_mock:
+        raise backends.BackendUnavailable("no vision model configured")
     return _mock_estimate(image_bytes), "mock"

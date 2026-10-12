@@ -98,6 +98,11 @@ def public_url(port: int) -> str:
 
     if config.public_url:
         return config.public_url
+    if config.on_vercel:
+        # Stable production origin (shortest custom domain, else <project>.vercel.app).
+        host = (os.environ.get("VERCEL_PROJECT_PRODUCTION_URL") or os.environ.get("VERCEL_URL") or "").strip()
+        if host:
+            return host if host.startswith("https://") else f"https://{host}"
     tunnel = _tunnel_url()
     if tunnel:
         return tunnel

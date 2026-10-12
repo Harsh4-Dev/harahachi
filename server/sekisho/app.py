@@ -1,6 +1,16 @@
-"""Sekisho (関所) — FastAPI edge-AI gateway. Implements the API.md contract (v2)."""
+"""Sekisho (関所) — FastAPI edge-AI gateway. Implements the API.md contract (v2..v4).
+
+Runs unchanged in two places (API.md v4): the Docker container (``python -m
+sekisho``) and a Vercel Python function (``api/index.py`` re-exports ``app``).
+"""
 from __future__ import annotations
 
+import asyncio
+import hmac
+import json
+import random
+import re
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Form, Header, Request, UploadFile, File
@@ -15,6 +25,7 @@ from . import (
     chat_assistant,
     db,
     feedback,
+    images,
     push,
     security,
     suggestions as sug,
@@ -23,7 +34,10 @@ from . import admin
 from .accounts import AccountError
 from .admin import router as admin_router
 from .config import config
+from pydantic import ValidationError
+
 from .models import (
+    DISH_MAX,
     Analysis,
     CalendarDay,
     CalendarOut,
@@ -49,43 +63,55 @@ from .models import (
     WeightOut,
     Workout,
     WorkoutIn,
+    valid_date,
 )
 from .mock_analyzer import analyze_mock
 from .nutrition import compute_targets, eta_date
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_HINT_CHARS = 200
+BARCODE_RE = re.compile(r"[0-9]{6,18}")
+MONTH_RE = re.compile(r"[0-9]{4}-[0-9]{2}")
 
-app = FastAPI(title="Sekisho", version="2.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Same 30/min default as v1, but now DB-backed (security.RateLimiter).
+RATE_LIMIT_MSG = "requests/min exceeded for this device"
 
 
-@app.on_event("startup")
-async def _on_startup():
-    # Bootstrap the backend registry from env and start the push scheduler.
+def warm_up() -> None:
+    """Idempotent boot work: DB/migrations + backend registry bootstrap.
+    Called from the lifespan AND eagerly by api/index.py (serverless).
+
+    Keeper (phone-admin) is NEVER granted here: the only grant path is the web
+    admin dashboard's Users toggle (no env-var grant that a username squatter
+    could ride on the next cold start)."""
+    db.ensure_init()
     try:
         backends.bootstrap()
     except Exception:
         pass
-    try:
-        accounts.apply_admin_users_env()
-    except Exception:
-        pass
-    try:
-        push.start_scheduler()
-    except Exception:
-        pass
 
 
-@app.on_event("shutdown")
-async def _on_shutdown():
-    push.stop_scheduler()
+@asynccontextmanager
+async def lifespan(_app):
+    # Bootstrap the backend registry from env and (Docker only) start the push
+    # scheduler. On Vercel there is no background loop: /api/cron/tick drives it.
+    try:
+        warm_up()
+    except Exception:
+        pass
+    if not config.on_vercel:
+        try:
+            push.start_scheduler()
+        except Exception:
+            pass
+    try:
+        yield
+    finally:
+        push.stop_scheduler()
+
+
+app = FastAPI(title="Sekisho", version="2.0", docs_url=None, redoc_url=None, openapi_url=None,
+              lifespan=lifespan)
 
 
 def err(code: str, message: str, status: int) -> JSONResponse:
@@ -93,6 +119,8 @@ def err(code: str, message: str, status: int) -> JSONResponse:
 
 
 # ---------- request logging middleware ----------
+# Stores ONLY method, path (no query string), status, device/user ids and timing.
+# Never bodies: no image bytes, PINs, keys, passwords or chat text reach the log.
 @app.middleware("http")
 async def request_logger(request: Request, call_next):
     import time as _time
@@ -100,8 +128,13 @@ async def request_logger(request: Request, call_next):
     response = await call_next(request)
     try:
         path = request.url.path
-        if path.startswith("/api/") or path.startswith("/admin") or path.startswith("/llm/"):
-            dev = getattr(request.state, "device", None)
+        dev = getattr(request.state, "device", None)
+        anonymous_miss = (dev is None and response.status_code in (401, 404)
+                          and not admin._valid_session(request.cookies.get(admin.COOKIE)))
+        # Unauthenticated 401/404 hits (scanners, bad keys) are NOT logged: they
+        # would let anyone flood the admin's request log for free.
+        if not anonymous_miss and (path.startswith("/api/") or path.startswith("/admin")
+                                   or path.startswith("/llm/")):
             duration_ms = int((_time.perf_counter() - _t0) * 1000)
             with db.cursor() as cur:
                 cur.execute(
@@ -119,12 +152,57 @@ async def request_logger(request: Request, call_next):
                         duration_ms,
                     ),
                 )
-                cur.execute(
-                    "DELETE FROM request_log WHERE id NOT IN "
-                    "(SELECT id FROM request_log ORDER BY id DESC LIMIT 500)"
-                )
+                # Prune to the last ~500 rows now and then (and on every cron tick)
+                # instead of on every request — one less round-trip on Postgres.
+                if random.random() < 0.05:
+                    cur.execute(
+                        "DELETE FROM request_log WHERE id NOT IN "
+                        "(SELECT id FROM request_log ORDER BY id DESC LIMIT 500)"
+                    )
     except Exception:
         pass
+    return response
+
+
+# ---------- request size cap (clean 413 envelope) ----------
+_IMAGE_ROUTES = ("/api/v1/meals/analyze", "/api/v1/profile/body-photo")
+
+
+@app.middleware("http")
+async def body_size_limit(request: Request, call_next):
+    cl = request.headers.get("content-length")
+    if cl:
+        try:
+            too_big = int(cl) > config.max_body_bytes
+        except ValueError:
+            return err("bad_request", "Invalid Content-Length", 400)
+        if too_big:
+            if request.url.path in _IMAGE_ROUTES:
+                return err("image_too_large",
+                           f"Upload exceeds the {config.max_body_bytes // 1000} KB request limit", 413)
+            return err("payload_too_large",
+                       f"Request body exceeds {config.max_body_bytes // 1000} KB", 413)
+    return await call_next(request)
+
+
+# ---------- security headers on every function response ----------
+_API_CSP = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'"
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    h = response.headers
+    h.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    h.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    h.setdefault("X-Frame-Options", "DENY")
+    h.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    if "content-security-policy" not in h:
+        h["Content-Security-Policy"] = _API_CSP
+    path = request.url.path
+    if path.startswith(("/api/", "/admin", "/llm/")) and "cache-control" not in h:
+        h["Cache-Control"] = "no-store"
     return response
 
 
@@ -145,7 +223,7 @@ async def require_device(request: Request, authorization: str = Header(default="
     if device is None:
         raise AuthError("invalid_key", "Unknown or revoked device key", 401)
     if not security.rate_limit_ok(device["device_id"]):
-        raise AuthError("rate_limited", "30 requests/min exceeded for this device", 429)
+        raise AuthError("rate_limited", f"{config.rate_limit_per_min} {RATE_LIMIT_MSG}", 429)
     request.state.device = device
     return device
 
@@ -183,9 +261,74 @@ async def _account_error_handler(_request: Request, exc: AccountError):
     return err(exc.code, exc.message, exc.status)
 
 
+@app.exception_handler(images.ImageRejected)
+async def _image_error_handler(_request: Request, exc: images.ImageRejected):
+    return err(exc.code, exc.message, exc.status)
+
+
+@app.exception_handler(db.ConfigError)
+async def _config_error_handler(_request: Request, exc: db.ConfigError):
+    return err("server_misconfigured", str(exc), 503)
+
+
+_CAP_MSG = {
+    "user": "Daily AI limit reached for this account ({cap}/day). Log manually or try tomorrow.",
+    "device": "Daily AI limit reached for this device ({cap}/day). Log manually or try tomorrow.",
+    "global": "The server's daily AI budget is used up. Log manually or try tomorrow.",
+}
+
+
+def _llm_cap_or_none(device: dict) -> JSONResponse | None:
+    """Per-user + per-device + global daily caps on every call that spends LLM
+    credits (analyze, body-photo, chat, insights, suggestions, /llm/v1)."""
+    which = security.llm_caps_exceeded(device.get("active_user_id"), device.get("device_id"))
+    if which:
+        cap = {"user": config.daily_llm_cap, "device": config.device_daily_llm_cap,
+               "global": config.global_daily_llm_cap}[which]
+        return err("daily_cap", _CAP_MSG[which].format(cap=cap), 429)
+    return None
+
+
+def _bad_date(name: str) -> JSONResponse:
+    return err("bad_date", f"{name} must be a YYYY-MM-DD date", 400)
+
+
+# ================= CRON (serverless scheduler) =================
+@app.get("/api/cron/tick")
+async def cron_tick(request: Request):
+    """One idempotent push-scheduler pass. Auth: ``Authorization: Bearer $CRON_SECRET``
+    (constant-time compare). 401 without/with a wrong secret, and when no
+    CRON_SECRET is configured (fail closed)."""
+    secret = config.cron_secret
+    problem = config.cron_secret_problem()
+    if problem and secret:
+        # Set but too short on Vercel: fail closed with a clear, actionable message.
+        return err("server_misconfigured", problem, 503)
+    sent = request.headers.get("authorization", "")
+    expected = f"Bearer {secret}"
+    if not secret or not hmac.compare_digest(sent.encode("utf-8"), expected.encode("utf-8")):
+        return err("unauthorized", "Valid Authorization: Bearer <CRON_SECRET> required", 401)
+    return await push.cron_tick()
+
+
 # ================= HEALTH =================
+def _health_detail_allowed(request: Request, authorization: str) -> bool:
+    """Backend/model detail only for the web admin session or a keeper device."""
+    if admin._valid_session(request.cookies.get(admin.COOKIE)):
+        return True
+    if authorization.lower().startswith("bearer "):
+        device = security.resolve_device(authorization.split(" ", 1)[1].strip())
+        if device is not None:
+            request.state.device = device
+            return accounts.is_admin(device.get("active_user_id"))
+    return False
+
+
 @app.get("/api/v1/health")
-async def health():
+async def health(request: Request, authorization: str = Header(default="")):
+    # Public liveness only: no provider/model/backend detail for anonymous callers.
+    if not _health_detail_allowed(request, authorization):
+        return {"status": "ok"}
     connected, model = await backends.check_health()
     summary = backends.active_summary()
     return {
@@ -215,7 +358,9 @@ async def pair_claim(body: PairClaimIn):
 # ================= ACCOUNTS (v2) =================
 @app.post("/api/v1/auth/register", status_code=201)
 async def auth_register(body: RegisterIn, device: dict = Depends(require_device)):
-    user = accounts.register(body.username, body.pin)
+    user = accounts.register(body.username, body.pin, device["device_id"])
+    # New active user on this phone: the previous account's reminders stop here.
+    push.unsubscribe_device(device["device_id"], keep_user_id=user["id"])
     security.set_active_user(device["device_id"], user["id"])
     # Optional initial profile.
     if body.profile is not None:
@@ -225,7 +370,10 @@ async def auth_register(body: RegisterIn, device: dict = Depends(require_device)
 
 @app.post("/api/v1/auth/login")
 async def auth_login(body: LoginIn, device: dict = Depends(require_device)):
-    user = accounts.login(body.username, body.pin)
+    user = accounts.login(body.username, body.pin, device["device_id"])
+    if device.get("active_user_id") != user["id"]:
+        # Account switch: drop the previous user's push subscription on this device.
+        push.unsubscribe_device(device["device_id"], keep_user_id=user["id"])
     security.set_active_user(device["device_id"], user["id"])
     profile = _load_profile_out(user["id"])
     return {"user": user, "profile": profile.model_dump() if profile else None}
@@ -233,6 +381,7 @@ async def auth_login(body: LoginIn, device: dict = Depends(require_device)):
 
 @app.post("/api/v1/auth/logout")
 async def auth_logout(device: dict = Depends(require_device)):
+    push.unsubscribe_device(device["device_id"])
     security.set_active_user(device["device_id"], None)
     return {"ok": True}
 
@@ -251,13 +400,6 @@ async def auth_me(device: dict = Depends(require_device)):
 
 
 # ================= ANALYZE =================
-_MIME_BY_MAGIC = [
-    (b"\xff\xd8\xff", "image/jpeg"),
-    (b"\x89PNG\r\n\x1a\n", "image/png"),
-    (b"RIFF", "image/webp"),
-]
-
-
 def _sum_item_nutrients(analysis: Analysis) -> Analysis:
     """Ensure the top-level fiber/sugar/sodium reflect the sum of the items'
     values (None when no item reports that nutrient), so the contract's
@@ -266,15 +408,6 @@ def _sum_item_nutrients(analysis: Analysis) -> Analysis:
         vals = [getattr(i, field) for i in analysis.items if getattr(i, field) is not None]
         setattr(analysis, field, sum(vals) if vals else None)
     return analysis
-
-
-def _sniff_mime(data: bytes, fallback: str) -> str:
-    for magic, mime in _MIME_BY_MAGIC:
-        if data.startswith(magic):
-            if mime == "image/webp" and b"WEBP" not in data[:16]:
-                continue
-            return mime
-    return fallback or "image/jpeg"
 
 
 @app.post("/api/v1/meals/analyze")
@@ -289,11 +422,17 @@ async def analyze(
         return err("empty_image", "No image data received", 400)
     if len(data) > MAX_IMAGE_BYTES:
         return err("image_too_large", "Image exceeds 8MB limit", 413)
+    if len(hint) > MAX_HINT_CHARS:
+        return err("bad_request", f"hint must be at most {MAX_HINT_CHARS} characters", 400)
     if portion not in ("small", "regular", "large"):
         portion = "regular"
-    mime = _sniff_mime(data, image.content_type or "image/jpeg")
+    # magic bytes + Pillow parse (never trust content-type); CPU-bound -> thread
+    mime = await asyncio.to_thread(images.validate, data)
 
     if backends.is_configured(need_vision=True):
+        capped = _llm_cap_or_none(device)
+        if capped:
+            return capped
         try:
             raw = await backends.analyze_image(data, mime, hint, portion)
             analysis = Analysis.model_validate(raw)
@@ -303,7 +442,7 @@ async def analyze(
             pass  # fall through to mock
 
     if not config.allow_mock:
-        return err("vllm_unavailable", "Vision model unreachable and mock disabled", 503)
+        return err("vllm_unavailable", "Vision model unreachable — please retry", 503)
 
     analysis = analyze_mock(data, hint, portion)
     return analysis.model_dump()
@@ -312,7 +451,7 @@ async def analyze(
 # ================= BARCODE / PACKAGED FOOD =================
 @app.get("/api/v1/food/barcode/{code}")
 async def food_barcode(code: str, device: dict = Depends(require_user)):
-    if not code.isdigit() or not (6 <= len(code) <= 18):
+    if not BARCODE_RE.fullmatch(code):
         return err("bad_barcode", "Barcode must be 6-18 digits", 400)
     result = await barcode_lookup.lookup(code)
     return result.model_dump()
@@ -346,6 +485,7 @@ def _log_meal(user_id: int, dish: str, calories: int, protein_g: int, carbs_g: i
         )
         meal_id = cur.lastrowid
         row = cur.execute("SELECT * FROM meals WHERE id=?", (meal_id,)).fetchone()
+    feedback.cache_invalidate(user_id, "sug:")
     return _row_to_meal(row)
 
 
@@ -356,6 +496,11 @@ async def create_meal(body: MealIn, device: dict = Depends(require_user)):
                      body.carbs_g, body.fat_g, eaten_at, body.source,
                      body.fiber_g, body.sugar_g, body.sodium_mg)
     return meal.model_dump()
+
+
+def _invalidate_suggestions(user_id: int) -> None:
+    """A logged/deleted meal changes what's left today: drop cached phrasing."""
+    feedback.cache_invalidate(user_id, "sug:")
 
 
 def _burned_between(user_id: int, start: str, end: str) -> int:
@@ -374,6 +519,9 @@ async def list_meals(request: Request, device: dict = Depends(require_user)):
     date = request.query_params.get("date")
     from_ = request.query_params.get("from")
     to = request.query_params.get("to")
+    for name, val in (("date", date), ("from", from_), ("to", to)):
+        if val is not None and not valid_date(val):
+            return _bad_date(name)
     if date:
         start, end = f"{date}T00:00:00", f"{date}T23:59:59.999999"
         water_day = date
@@ -411,6 +559,7 @@ async def list_meals(request: Request, device: dict = Depends(require_user)):
 async def delete_meal(meal_id: int, device: dict = Depends(require_user)):
     with db.cursor() as cur:
         cur.execute("DELETE FROM meals WHERE id=? AND user_id=?", (meal_id, device["user_id"]))
+    _invalidate_suggestions(device["user_id"])
     return Response(status_code=204)
 
 
@@ -496,8 +645,15 @@ async def profile_body_photo(device: dict = Depends(require_user), image: Upload
         return err("empty_image", "No image data received", 400)
     if len(data) > MAX_IMAGE_BYTES:
         return err("image_too_large", "Image exceeds 8MB limit", 413)
-    mime = _sniff_mime(data, image.content_type or "image/jpeg")
-    estimate, source = await body_photo.estimate(data, mime)
+    mime = await asyncio.to_thread(images.validate, data)
+    if backends.is_configured(need_vision=True):
+        capped = _llm_cap_or_none(device)
+        if capped:
+            return capped
+    try:
+        estimate, source = await body_photo.estimate(data, mime)
+    except backends.BackendUnavailable:
+        return err("vllm_unavailable", "Vision model unreachable — please retry", 503)
     # Photo is NOT stored — only the estimate is returned.
     out = estimate.model_dump()
     out["source"] = source
@@ -521,6 +677,9 @@ async def post_weight(body: WeightIn, device: dict = Depends(require_user)):
 async def get_weight(request: Request, device: dict = Depends(require_user)):
     frm = request.query_params.get("from")
     to = request.query_params.get("to")
+    for name, val in (("from", frm), ("to", to)):
+        if val is not None and not valid_date(val):
+            return _bad_date(name)
     data = feedback.weight_history(device["user_id"], frm, to)
     return WeightOut(**data).model_dump()
 
@@ -557,6 +716,8 @@ async def create_workout(body: WorkoutIn, device: dict = Depends(require_user)):
 
 @app.get("/api/v1/workouts")
 async def list_workouts(device: dict = Depends(require_user), date: str | None = None):
+    if date is not None and not valid_date(date):
+        return _bad_date("date")
     if date:
         start, end = f"{date}T00:00:00", f"{date}T23:59:59.999999"
     else:
@@ -579,7 +740,10 @@ async def list_workouts(device: dict = Depends(require_user), date: str | None =
 @app.get("/api/v1/suggestions")
 async def get_suggestions(device: dict = Depends(require_user), date: str | None = None):
     user_id = device["user_id"]
-    day = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if date is not None and not valid_date(date):
+        return _bad_date("date")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    day = date or today
     start, end = f"{day}T00:00:00", f"{day}T23:59:59.999999"
 
     targets = _get_targets(user_id)
@@ -606,8 +770,25 @@ async def get_suggestions(device: dict = Depends(require_user), date: str | None
     suggestions: list[Suggestion] = []
 
     if candidates and backends.is_configured():
+        # Cached per user per day (invalidated whenever a meal is logged/deleted),
+        # so reopening the screen never re-spends LLM credits.
+        cache_key = f"sug:{day}"
+        cached = feedback.cache_get(user_id, cache_key, today)
+        phrased = None
+        if cached is not None:
+            try:
+                phrased = json.loads(cached)
+            except ValueError:
+                phrased = None
+        if phrased is None:
+            capped = _llm_cap_or_none(device)
+            if capped:
+                return capped
         try:
-            phrased = await backends.phrase_suggestions(remaining.model_dump(), candidates)
+            if phrased is None:
+                phrased = await backends.phrase_suggestions(remaining.model_dump(), candidates)
+                if isinstance(phrased, list) and phrased:
+                    feedback.cache_put(user_id, cache_key, today, json.dumps(phrased[:4]))
             for p in phrased[:4]:
                 suggestions.append(Suggestion(
                     dish=str(p.get("dish", "")),
@@ -631,9 +812,10 @@ async def get_suggestions(device: dict = Depends(require_user), date: str | None
 async def calendar(device: dict = Depends(require_user), month: str | None = None):
     user_id = device["user_id"]
     month = month or datetime.now(timezone.utc).strftime("%Y-%m")
-    try:
-        year, mon = (int(x) for x in month.split("-"))
-    except Exception:
+    if not MONTH_RE.fullmatch(month):
+        return err("bad_month", "month must be YYYY-MM", 400)
+    year, mon = (int(x) for x in month.split("-"))
+    if not (1 <= mon <= 12 and 1 <= year <= 9999):
         return err("bad_month", "month must be YYYY-MM", 400)
 
     import calendar as _cal
@@ -679,41 +861,83 @@ async def calendar(device: dict = Depends(require_user), month: str | None = Non
 
 
 # ================= CHAT (Annai v2) =================
+def _num(v) -> int:
+    """An LLM-emitted number (int, float or numeric string) -> int; raises on junk."""
+    if v is None or v == "":
+        return 0
+    if isinstance(v, bool):
+        raise ValueError("not a number")
+    return int(round(float(v)))
+
+
+def _meal_from_action(action: dict) -> MealIn | None:
+    """Validate a chat-emitted log_meal through the SAME model/bounds as
+    POST /meals (dish <= 120 chars, 0..5000 kcal, macro caps). Out-of-bounds or
+    malformed -> None (rejected, never logged or proposed)."""
+    try:
+        return MealIn(
+            dish=str(action.get("dish") or "meal").strip(),
+            calories=_num(action.get("calories")),
+            protein_g=_num(action.get("protein_g")),
+            carbs_g=_num(action.get("carbs_g")),
+            fat_g=_num(action.get("fat_g")),
+            source="suggestion",
+        )
+    except (ValidationError, ValueError, TypeError, OverflowError):
+        return None
+
+
+def _workout_from_action(action: dict) -> WorkoutIn | None:
+    """Same bounds as POST /workouts (minutes <= 600, burned <= 5000)."""
+    try:
+        return WorkoutIn(
+            kind=str(action.get("kind") or "workout").strip(),
+            minutes=_num(action.get("minutes")),
+            calories_burned=_num(action.get("calories_burned")),
+        )
+    except (ValidationError, ValueError, TypeError, OverflowError):
+        return None
+
+
 def _proposed_action(action: dict) -> dict | None:
     """Normalize a PROPOSED action (a recommendation) into the chip shape the app
     confirms. It is NOT executed server-side — the app logs it only if the user
-    accepts. Only log_meal recommendations are proposable."""
+    accepts. Only log_meal recommendations are proposable, and only within the
+    POST /meals bounds."""
     if action.get("action") != "log_meal":
+        return None
+    meal = _meal_from_action(action)
+    if meal is None:
         return None
     return {
         "action": "log_meal",
         "proposed": True,
-        "dish": str(action.get("dish") or "meal")[:200],
-        "calories": max(0, int(action.get("calories") or 0)),
-        "protein_g": max(0, int(action.get("protein_g") or 0)),
-        "carbs_g": max(0, int(action.get("carbs_g") or 0)),
-        "fat_g": max(0, int(action.get("fat_g") or 0)),
+        "dish": meal.dish,
+        "calories": meal.calories,
+        "protein_g": meal.protein_g,
+        "carbs_g": meal.carbs_g,
+        "fat_g": meal.fat_g,
     }
 
 
 def _execute_action(user_id: int, action: dict) -> dict | None:
     """Execute a parsed chat action server-side. Returns the normalized action
-    that was performed (with any server-filled fields), or None if invalid."""
+    that was performed (with any server-filled fields), or None if invalid or
+    out of bounds (rejected, not clamped)."""
     kind = action.get("action")
     try:
         if kind == "log_meal":
-            dish = str(action.get("dish") or "meal")[:200]
-            cal = max(0, int(action.get("calories") or 0))
-            prot = max(0, int(action.get("protein_g") or 0))
-            carb = max(0, int(action.get("carbs_g") or 0))
-            fat = max(0, int(action.get("fat_g") or 0))
-            meal = _log_meal(user_id, dish, cal, prot, carb, fat, security.now_iso(), "suggestion")
+            m = _meal_from_action(action)
+            if m is None:
+                return None
+            meal = _log_meal(user_id, m.dish, m.calories, m.protein_g, m.carbs_g, m.fat_g,
+                             security.now_iso(), "suggestion")
             return {"action": "log_meal", "meal": meal.model_dump()}
         if kind == "log_workout":
-            k = str(action.get("kind") or "workout")[:80]
-            minutes = max(0, int(action.get("minutes") or 0))
-            burned = max(0, int(action.get("calories_burned") or 0))
-            w = _log_workout(user_id, k, minutes, burned, None)
+            wk = _workout_from_action(action)
+            if wk is None:
+                return None
+            w = _log_workout(user_id, wk.kind, wk.minutes, wk.calories_burned, None)
             return {"action": "log_workout", "workout": w.model_dump()}
         if kind == "set_goal":
             goal = action.get("goal")
@@ -741,6 +965,9 @@ async def chat(body: ChatIn, device: dict = Depends(require_user)):
     source: str
 
     if backends.is_configured():
+        capped = _llm_cap_or_none(device)
+        if capped:
+            return capped
         try:
             reply, action = await chat_assistant.backend_reply(user_id, msgs)
             source = "vllm"
@@ -763,6 +990,9 @@ async def chat(body: ChatIn, device: dict = Depends(require_user)):
             performed = _proposed_action(action)
         else:
             performed = _execute_action(user_id, action)
+            if performed is None and action.get("action") in ("log_meal", "log_workout"):
+                reply = (reply.strip() + "\n\n(I didn't log that — the details looked out of "
+                         "range. Please log it manually.)")
 
     return ChatV2Out(reply=reply.strip()[:4000], action=performed, source=source).model_dump()
 
@@ -771,14 +1001,18 @@ async def chat(body: ChatIn, device: dict = Depends(require_user)):
 @app.get("/api/v1/push/vapid-public-key")
 async def push_vapid_key():
     # No auth — the app needs this before subscribing.
-    return {"public_key": push.vapid_public_key()}
+    try:
+        return {"public_key": push.vapid_public_key()}
+    except push.PushUnconfigured:
+        return err("push_unconfigured", "Push notifications are not configured on this server", 503)
 
 
 @app.post("/api/v1/push/subscribe", status_code=201)
 async def push_subscribe(body: PushSubscribeIn, device: dict = Depends(require_user)):
-    if not body.subscription.get("endpoint"):
-        return err("bad_subscription", "subscription.endpoint required", 400)
-    push.subscribe(device["user_id"], device["device_id"], body.subscription, body.tz_offset_min)
+    try:
+        push.subscribe(device["user_id"], device["device_id"], body.subscription, body.tz_offset_min)
+    except push.BadSubscription as e:
+        return err("bad_subscription", str(e), 400)
     return {"ok": True}
 
 
@@ -798,7 +1032,10 @@ async def get_streaks(device: dict = Depends(require_user)):
 @app.get("/api/v1/insights")
 async def get_insights(request: Request, device: dict = Depends(require_user)):
     user_id = device["user_id"]
-    week = request.query_params.get("week") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    week = request.query_params.get("week") or today
+    if not valid_date(week):
+        return err("bad_week", "week must be a YYYY-MM-DD date", 400)
     try:
         data = feedback.insights(user_id, week)
     except ValueError:
@@ -806,12 +1043,21 @@ async def get_insights(request: Request, device: dict = Depends(require_user)):
 
     summary = None
     if backends.is_configured():
-        try:
-            msgs = feedback.insights_prompt(data)
-            raw = await backends.chat_completion(msgs, max_tokens=200, temperature=0.6)
-            summary = raw.strip()[:600]
-        except Exception:
-            summary = None
+        # One LLM summary per user per week per day (cached), capped like chat.
+        cache_key = f"ins:{data.get('week_start', week)}"
+        summary = feedback.cache_get(user_id, cache_key, today)
+        if summary is None:
+            capped = _llm_cap_or_none(device)
+            if capped:
+                return capped
+            try:
+                msgs = feedback.insights_prompt(data)
+                raw = await backends.chat_completion(msgs, max_tokens=200, temperature=0.6, task="insights")
+                summary = raw.strip()[:600]
+                if summary:
+                    feedback.cache_put(user_id, cache_key, today, summary)
+            except Exception:
+                summary = None
     if not summary:
         summary = feedback.insights_summary(data)
     data["summary"] = summary
@@ -853,6 +1099,12 @@ async def llm_chat_completions(request: Request, device: dict = Depends(require_
         return err("bad_request", "Body must be a JSON object", 400)
     if payload.get("stream"):
         return err("streaming_unsupported", "Streaming responses are not supported on this proxy", 400)
+    problem = backends.validate_passthrough_payload(payload)
+    if problem:
+        return err("bad_request", problem, 400)
+    capped = _llm_cap_or_none(device)
+    if capped:
+        return capped
     try:
         status, body = await backends.passthrough_chat_completions(payload)
     except Exception:
@@ -907,3 +1159,15 @@ async def keeper_backends_active(
 
 # mount admin
 app.include_router(admin_router)
+
+# CORS last => OUTERMOST middleware, so even 413/429/401 envelopes carry the
+# CORS headers the APK (capacitor://localhost / https://localhost) needs to read
+# them. Bearer-key auth, no cookies cross-origin => allow_credentials=False.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.cors_allowed_origins(),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
+    max_age=600,
+)

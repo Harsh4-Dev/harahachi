@@ -6,6 +6,10 @@
 //    65s, everything else 12s) — no request may hang forever (user requirement).
 //  • Accounts (register/login/logout/me), body-photo estimate, chat, push.
 //  • A global onNoUser hook: any 401 {code:"no_user"} routes the app to login.
+//
+// v4 (Vercel + NVIDIA NIM): a global device-revoked hook (401 invalid_key →
+// "pair this phone again"), and non-JSON error bodies (platform 413/504 pages)
+// no longer crash the parser. Photo callers downscale via lib/imagePrep first.
 
 import type {
   AnalyzeResult,
@@ -63,6 +67,47 @@ export function setNoUserHandler(fn: (() => void) | null): void {
   noUserHandler = fn;
 }
 
+// 401 codes meaning the device key itself is unknown / revoked (NOT a bad PIN
+// and NOT "no active user", which routes to login instead). v4: devices must
+// re-pair to the new Vercel deployment, so this is an expected state.
+export const DEVICE_REVOKED_CODES = new Set([
+  'invalid_key',
+  'missing_bearer',
+  'unknown_device',
+  'device_revoked',
+  'revoked_device',
+  'invalid_device',
+]);
+
+// Global hook: fired when any authenticated call returns 401 with a
+// DEVICE_REVOKED_CODES code. AppContext routes to the "pair again" screen.
+let deviceRevokedHandler: (() => void) | null = null;
+export function setDeviceRevokedHandler(fn: (() => void) | null): void {
+  deviceRevokedHandler = fn;
+}
+
+// Build the ApiError for a failed response and fire the global hooks. Shared
+// by the real client and the DEV-only fault injection in the demo client so
+// both exercise the same routing.
+export function apiErrorFrom(status: number, body: unknown, statusText = ''): ApiError {
+  const err = ((body as { error?: { code?: string; message?: string } } | null)?.error ?? {});
+  const code = err.code ?? (status === 413 ? 'image_too_large' : 'http_error');
+  if (status === 401 && code === 'no_user') noUserHandler?.();
+  else if (status === 401 && DEVICE_REVOKED_CODES.has(code)) deviceRevokedHandler?.();
+  return new ApiError(code, err.message ?? statusText, status);
+}
+
+// Parse a response body that SHOULD be JSON but may not be (a platform-level
+// 413/504 from Vercel is HTML/plain text). Never throws.
+function safeJson(text: string): unknown {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 function apiRoot(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, '') + '/api/v1';
 }
@@ -97,15 +142,10 @@ export function createHttpClient(pairing: Pairing): HarahachiClient {
     }, timeoutMs);
     if (res.status === 204) return undefined as T;
     const text = await res.text();
-    const body = text ? JSON.parse(text) : null;
-    if (!res.ok) {
-      const err = body?.error ?? {};
-      const code = err.code ?? 'http_error';
-      // Global no-user handling: any endpoint may report the device has no
-      // active user → route to login.
-      if (res.status === 401 && code === 'no_user') noUserHandler?.();
-      throw new ApiError(code, err.message ?? res.statusText, res.status);
-    }
+    const body = safeJson(text);
+    // Global handling: no_user → login; unknown/revoked device → pair again.
+    if (!res.ok) throw apiErrorFrom(res.status, body, res.statusText);
+    if (body === null && text) throw new ApiError('bad_response', 'Unexpected server response.', res.status);
     return body as T;
   }
 
@@ -348,10 +388,14 @@ export async function claimPairing(
     TIMEOUT_SHORT,
   );
   const text = await res.text();
-  const body = text ? JSON.parse(text) : null;
-  if (!res.ok) {
+  const body = safeJson(text) as { device_id: string; device_key: string; error?: { code?: string; message?: string } } | null;
+  if (!res.ok || !body?.device_key) {
     const err = body?.error ?? {};
-    throw new ApiError(err.code ?? 'pair_failed', err.message ?? res.statusText, res.status);
+    throw new ApiError(
+      err.code ?? 'pair_failed',
+      err.message ?? (res.ok ? 'That address did not answer like a checkpoint.' : res.statusText),
+      res.ok ? 502 : res.status,
+    );
   }
   return body;
 }

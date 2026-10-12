@@ -11,18 +11,43 @@ calorie goal is already met; 22:00 becomes a nudge when nothing was logged.
 
 pywebpush is imported lazily so the module (and tests) load even if it's absent;
 webpush() is monkeypatchable for the smoke test.
+
+v4 - two ways to drive the same idempotent ``run_due()`` pass:
+  * Docker/dev: the in-process asyncio loop (``start_scheduler``), every 60 s.
+  * Vercel: NO background loop (instances freeze between requests). An external
+    pinger calls ``GET /api/cron/tick`` (Bearer CRON_SECRET) every 10-15 min and a
+    once-daily Vercel Cron is the safety net. Each subscription's slot is CLAIMED
+    with a conditional UPDATE before sending, so concurrent/duplicate ticks on
+    different instances can never double-send.
+VAPID keys come from ``VAPID_PUBLIC_KEY``/``VAPID_PRIVATE_KEY`` env when set
+(required on Vercel); otherwise (Docker) they are generated once and persisted.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
+import os
+import re
+import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 from . import db
 from .chat_assistant import remaining, today_totals
 
-VAPID_SUBJECT = "mailto:admin@harahachi.local"
+VAPID_SUBJECT = os.environ.get("VAPID_SUBJECT") or "mailto:admin@harahachi.local"
+
+
+class PushUnconfigured(RuntimeError):
+    """No VAPID keys available (Vercel without VAPID_* env)."""
+
+
+def _utcnow() -> datetime:
+    """Clock seam - the smoke tests monkeypatch this to force a slot hour."""
+    return datetime.now(timezone.utc)
 
 log = logging.getLogger("sekisho.push")
 
@@ -44,11 +69,19 @@ _status: dict = {
 # VAPID keys (generated once, persisted)
 # ---------------------------------------------------------------------------
 def ensure_vapid_keys() -> tuple[str, str]:
-    """Return (public_key_b64url, private_key_pem). Generates + persists once."""
+    """Return (public_key_b64url, private_key). Env wins; else DB; else (Docker
+    only) generate + persist once. On Vercel without env keys -> PushUnconfigured."""
+    env_pub = (os.environ.get("VAPID_PUBLIC_KEY") or "").strip()
+    env_priv = (os.environ.get("VAPID_PRIVATE_KEY") or "").strip().replace("\\n", "\n")
+    if env_pub and env_priv:
+        return env_pub, env_priv
     pub = db.get_setting("vapid_public_key")
     priv = db.get_setting("vapid_private_key")
     if pub and priv:
         return pub, priv
+    from .config import config
+    if config.on_vercel:
+        raise PushUnconfigured("VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY are not set")
 
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -78,11 +111,86 @@ def vapid_public_key() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Subscription validation (SSRF guard, M1)
+# ---------------------------------------------------------------------------
+# The server POSTs to whatever endpoint a subscription names, so only the real
+# browser push services are allowed: https, default port, no userinfo, and a
+# host on this list (exact, or a subdomain of a "*." entry).
+PUSH_HOSTS_EXACT = frozenset({
+    "fcm.googleapis.com",                 # Chrome / Android / Edge (FCM)
+    "updates.push.services.mozilla.com",  # Firefox
+    "web.push.apple.com",                 # Safari / iOS
+})
+PUSH_HOST_SUFFIXES = (
+    ".push.services.mozilla.com",
+    ".notify.windows.com",                # Edge legacy (WNS)
+    ".push.apple.com",
+)
+MAX_SUBSCRIPTION_JSON = 1024              # bytes of the stored JSON
+MAX_SUBS_PER_USER = 5                     # oldest dropped beyond this
+SEND_TIMEOUT = 5                          # seconds per push-service request
+_B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
+
+
+class BadSubscription(ValueError):
+    """The subscription is not a well-formed browser push subscription."""
+
+
+def _b64url_decode(value: object, field: str, max_chars: int) -> bytes:
+    if not isinstance(value, str) or not value or len(value) > max_chars or not _B64URL_RE.fullmatch(value):
+        raise BadSubscription(f"keys.{field} must be base64url")
+    try:
+        return base64.urlsafe_b64decode(value.rstrip("=") + "=" * (-len(value.rstrip("=")) % 4))
+    except (binascii.Error, ValueError):
+        raise BadSubscription(f"keys.{field} must be base64url")
+
+
+def push_host_allowed(host: str) -> bool:
+    host = (host or "").lower().rstrip(".")
+    return host in PUSH_HOSTS_EXACT or any(host.endswith(sfx) for sfx in PUSH_HOST_SUFFIXES)
+
+
+def validate_subscription(sub: object) -> dict:
+    """Return a normalized ``{endpoint, keys:{p256dh, auth}}`` or raise BadSubscription."""
+    if not isinstance(sub, dict):
+        raise BadSubscription("subscription must be an object")
+    endpoint = sub.get("endpoint")
+    if not isinstance(endpoint, str) or not endpoint or len(endpoint) > 800:
+        raise BadSubscription("subscription.endpoint required")
+    try:
+        parts = urlsplit(endpoint)
+        port = parts.port
+    except ValueError:
+        raise BadSubscription("subscription.endpoint is not a valid URL")
+    if parts.scheme != "https":
+        raise BadSubscription("subscription.endpoint must be https")
+    if parts.username or parts.password or port not in (None, 443):
+        raise BadSubscription("subscription.endpoint must not carry credentials or a port")
+    if not push_host_allowed(parts.hostname or ""):
+        raise BadSubscription("subscription.endpoint is not a known browser push service")
+    keys = sub.get("keys")
+    if not isinstance(keys, dict):
+        raise BadSubscription("subscription.keys required")
+    p256dh = _b64url_decode(keys.get("p256dh"), "p256dh", 100)
+    auth = _b64url_decode(keys.get("auth"), "auth", 32)
+    if len(p256dh) != 65 or p256dh[0] != 4:
+        raise BadSubscription("keys.p256dh must be an uncompressed P-256 public key")
+    if not 8 <= len(auth) <= 32:
+        raise BadSubscription("keys.auth has the wrong length")
+    clean = {"endpoint": endpoint, "keys": {"p256dh": keys["p256dh"], "auth": keys["auth"]}}
+    if len(json.dumps(clean)) > MAX_SUBSCRIPTION_JSON:
+        raise BadSubscription("subscription is too large")
+    return clean
+
+
+# ---------------------------------------------------------------------------
 # Subscription storage
 # ---------------------------------------------------------------------------
 def subscribe(user_id: int, device_id: str, subscription: dict, tz_offset_min: int) -> None:
+    """Store a VALIDATED subscription (raises BadSubscription) for user+device,
+    keeping at most MAX_SUBS_PER_USER per user (the oldest are dropped)."""
     from .security import now_iso
-    endpoint = str(subscription.get("endpoint") or "")
+    clean = validate_subscription(subscription)
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO push_subscriptions "
@@ -90,8 +198,14 @@ def subscribe(user_id: int, device_id: str, subscription: dict, tz_offset_min: i
             "VALUES (?,?,?,?,?,?) "
             "ON CONFLICT(user_id, device_id) DO UPDATE SET "
             "endpoint=excluded.endpoint, subscription=excluded.subscription, "
-            "tz_offset_min=excluded.tz_offset_min",
-            (user_id, device_id, endpoint, json.dumps(subscription), tz_offset_min, now_iso()),
+            "tz_offset_min=excluded.tz_offset_min, created_at=excluded.created_at",
+            (user_id, device_id, clean["endpoint"], json.dumps(clean), tz_offset_min, now_iso()),
+        )
+        cur.execute(
+            "DELETE FROM push_subscriptions WHERE user_id=? AND id NOT IN "
+            "(SELECT id FROM push_subscriptions WHERE user_id=? "
+            " ORDER BY created_at DESC, id DESC LIMIT ?)",
+            (user_id, user_id, MAX_SUBS_PER_USER),
         )
 
 
@@ -101,6 +215,18 @@ def unsubscribe(user_id: int, device_id: str) -> None:
             "DELETE FROM push_subscriptions WHERE user_id=? AND device_id=?",
             (user_id, device_id),
         )
+
+
+def unsubscribe_device(device_id: str, keep_user_id: int | None = None) -> int:
+    """Drop every subscription bound to a device (logout / account switch /
+    revoke), optionally keeping the one owned by ``keep_user_id``."""
+    with db.cursor() as cur:
+        if keep_user_id is None:
+            cur.execute("DELETE FROM push_subscriptions WHERE device_id=?", (device_id,))
+        else:
+            cur.execute("DELETE FROM push_subscriptions WHERE device_id=? AND user_id<>?",
+                        (device_id, keep_user_id))
+        return max(0, cur.rowcount or 0)
 
 
 def subscription_count() -> int:
@@ -147,13 +273,46 @@ def send_web_push(subscription: dict, payload: dict) -> None:
     """
     from pywebpush import webpush  # lazy import
 
-    _pub, priv_pem = ensure_vapid_keys()
+    subscription = validate_subscription(subscription)  # never POST anywhere else
+    _pub, priv = ensure_vapid_keys()
     webpush(
         subscription_info=subscription,
         data=json.dumps(payload),
-        vapid_private_key=priv_pem,
+        vapid_private_key=_vapid_signer(priv),
         vapid_claims={"sub": VAPID_SUBJECT},
+        timeout=SEND_TIMEOUT,
+        requests_session=_no_redirect_session(),
     )
+
+
+def _no_redirect_session():
+    """A requests Session that never follows redirects (a push service answering
+    3xx must not bounce us to an internal URL) and ignores proxy env vars."""
+    import requests
+
+    class _NoRedirect(requests.Session):
+        def request(self, method, url, **kwargs):  # type: ignore[override]
+            kwargs["allow_redirects"] = False
+            return super().request(method, url, **kwargs)
+
+    sess = _NoRedirect()
+    sess.trust_env = False
+    # Do NOT set max_redirects = 0: requests still runs its redirect generator
+    # once with allow_redirects=False (to fill response._next), and a limit of 0
+    # makes that raise TooManyRedirects. allow_redirects=False already ensures
+    # no redirect is ever followed.
+    return sess
+
+
+def _vapid_signer(priv: str):
+    """py_vapid signer from a PEM (Docker-generated) or base64url raw/DER key (env).
+
+    pywebpush's string path only understands base64url raw/DER, so a PEM must be
+    loaded explicitly (passing the PEM string straight through fails to parse)."""
+    from py_vapid import Vapid
+    if "BEGIN" in priv:
+        return Vapid.from_pem(priv.encode("ascii"))
+    return Vapid.from_string(private_key=priv)
 
 
 def send_to_subscriptions(subs: list[dict], payload: dict) -> dict:
@@ -167,8 +326,17 @@ def send_to_subscriptions(subs: list[dict], payload: dict) -> dict:
     pruned = 0
     errors: list[str] = []
     for s in subs:
+        # Re-validate at send time: rows stored before the allowlist existed
+        # (or written behind the API's back) are skipped and pruned, never sent.
         try:
-            send_web_push(json.loads(s["subscription"]), payload)
+            sub_info = validate_subscription(json.loads(s["subscription"]))
+        except (BadSubscription, ValueError, TypeError) as e:
+            errors.append(f"invalid: {str(e)[:120]}")
+            _prune_subscription(s["id"])
+            pruned += 1
+            continue
+        try:
+            send_web_push(sub_info, payload)
             sent += 1
         except Exception as e:  # noqa: BLE001
             status = _webpush_status(e)
@@ -252,7 +420,13 @@ def _local_hour(now_utc: datetime, tz_offset_min: int) -> tuple[int, str]:
     return local.hour, local.strftime("%Y-%m-%d")
 
 
-async def run_due(now_utc: datetime | None = None) -> int:
+# Wall-clock budget for one scheduler pass. Vercel kills the function at
+# maxDuration (300 s); stop well before so housekeeping + the response still
+# happen. Unsent subscriptions are not claimed and go out on the next tick.
+RUN_DUE_BUDGET = 200.0
+
+
+async def run_due(now_utc: datetime | None = None, budget_s: float = RUN_DUE_BUDGET) -> int:
     """Fire any reminders whose local time hits 15:00, 18:00 or 22:00 and haven't
     been sent yet today. Returns the number of notifications sent. Exposed for the
     smoke test to force a tick.
@@ -261,11 +435,15 @@ async def run_due(now_utc: datetime | None = None) -> int:
     so if the process was asleep across a slot boundary the reminder still fires
     the first tick within that local hour (once — the per-slot/day marker guards
     against repeats). It won't back-fire slots whose hour has fully passed."""
-    now_utc = now_utc or datetime.now(timezone.utc)
+    now_utc = now_utc or _utcnow()
+    deadline = time.monotonic() + budget_s
     sent = 0
     pruned = 0
     _slot_col = {"15": "last_sent_15", "18": "last_sent_18", "22": "last_sent_22"}
     for sub in all_subscriptions():
+        if time.monotonic() > deadline:
+            _status["last_error"] = "tick budget exhausted; remaining reminders deferred"
+            break
         hour, local_date = _local_hour(now_utc, sub["tz_offset_min"])
         slot = "15" if hour == 15 else "18" if hour == 18 else "22" if hour == 22 else None
         if slot is None:
@@ -273,22 +451,35 @@ async def run_due(now_utc: datetime | None = None) -> int:
         col = _slot_col[slot]
         if sub.get(col) == local_date:
             continue  # already sent this slot today
+        # Claim the (subscription, slot, local day) atomically BEFORE doing any
+        # work: only one tick - on any instance - wins; the rest skip.
+        if not _claim(sub["id"], col, local_date):
+            continue
         payload = build_reminder(sub["user_id"], slot)
         if payload is None:
-            # Mark as handled so we don't re-evaluate every minute this hour.
-            _mark_sent(sub["id"], col, local_date)
-            continue
-        result = send_to_subscriptions([sub], payload)
+            continue  # claimed = handled; don't re-evaluate this hour
+        result = await asyncio.to_thread(send_to_subscriptions, [sub], payload)
         sent += result["sent"]
         pruned += result["pruned"]
-        # Only mark-sent if the subscription still exists (wasn't pruned).
-        if result["pruned"] == 0:
-            _mark_sent(sub["id"], col, local_date)
     _status["last_tick"] = now_utc.isoformat()
     _status["last_tick_sent"] = sent
     _status["last_pruned"] = pruned
     _status["ticks"] += 1
+    try:
+        db.set_setting("push_last_tick", now_utc.isoformat())
+        db.set_setting("push_last_tick_sent", str(sent))
+    except Exception:  # noqa: BLE001 - observability only
+        pass
     return sent
+
+
+def _claim(sub_id: int, col: str, local_date: str) -> bool:
+    with db.cursor() as cur:
+        cur.execute(
+            f"UPDATE push_subscriptions SET {col}=? WHERE id=? AND ({col} IS NULL OR {col}<>?)",
+            (local_date, sub_id, local_date),
+        )
+        return cur.rowcount == 1
 
 
 def _mark_sent(sub_id: int, col: str, local_date: str) -> None:
@@ -318,12 +509,20 @@ def scheduler_status() -> dict:
     next_fires = sorted(
         _next_fire_utc(now, s["tz_offset_min"]).isoformat() for s in subs
     )
-    vapid_ok = bool(db.get_setting("vapid_public_key") and db.get_setting("vapid_private_key"))
+    vapid_ok = bool((os.environ.get("VAPID_PUBLIC_KEY") and os.environ.get("VAPID_PRIVATE_KEY"))
+                    or (db.get_setting("vapid_public_key") and db.get_setting("vapid_private_key")))
+    from .config import config
+    last_tick = _status["last_tick"] or db.get_setting("push_last_tick")
+    if _status["last_tick"]:
+        last_sent = _status["last_tick_sent"]
+    else:
+        last_sent = int(db.get_setting("push_last_tick_sent") or 0)
     return {
+        "mode": "cron" if config.on_vercel else "loop",
         "running": _status["running"],
         "started_at": _status["started_at"],
-        "last_tick": _status["last_tick"],
-        "last_tick_sent": _status["last_tick_sent"],
+        "last_tick": last_tick,
+        "last_tick_sent": last_sent,
         "ticks": _status["ticks"],
         "restarts": _status["restarts"],
         "last_error": _status["last_error"],
@@ -380,8 +579,35 @@ def _on_task_done(task: "asyncio.Task") -> None:
         pass
 
 
+async def cron_tick() -> dict:
+    """One serverless scheduler pass + housekeeping (GET /api/cron/tick)."""
+    from . import security
+    now = _utcnow()
+    sent = await run_due(now)
+    housekeeping: dict = {}
+    try:
+        housekeeping["counters_purged"] = security.purge_expired_counters()
+        security.purge_expired_tokens()
+        with db.cursor() as cur:
+            cur.execute(
+                "DELETE FROM request_log WHERE id NOT IN "
+                "(SELECT id FROM request_log ORDER BY id DESC LIMIT 500)"
+            )
+            # LLM text cache: keep only today's and yesterday's rows.
+            cutoff = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+            cur.execute("DELETE FROM llm_cache WHERE day < ?", (cutoff,))
+    except Exception as e:  # noqa: BLE001
+        housekeeping["error"] = str(e)[:160]
+    return {"ok": True, "at": now.isoformat(), "sent": sent,
+            "subscriptions": subscription_count(), "housekeeping": housekeeping}
+
+
 def start_scheduler() -> None:
+    """Start the in-process loop - Docker/dev only. Never on Vercel."""
     global _task
+    from .config import config
+    if config.on_vercel:
+        return
     if _task is not None:
         return
     try:

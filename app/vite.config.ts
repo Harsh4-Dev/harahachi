@@ -5,7 +5,7 @@ import { VitePWA } from 'vite-plugin-pwa';
 // https://vite.dev/config/
 export default defineConfig({
   server: {
-    host: true, // expose on LAN so the phone can reach the dev server
+    host: true, // dev only: lets a phone on the same Wi-Fi open the dev server
     port: 5173,
   },
   plugins: [

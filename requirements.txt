@@ -1,0 +1,14 @@
+# Python dependencies for the Vercel function (api/index.py -> server/sekisho).
+# Vercel's Python runtime installs THIS file (project root). Keep the pins
+# identical to server/requirements.txt (the Docker image); uvicorn is omitted
+# because Vercel serves the ASGI app itself. tests_smoke.py enforces the sync.
+fastapi==0.143.0
+pydantic==2.14.0
+httpx==0.28.1
+qrcode[pil]==8.2
+pillow==12.3.0
+python-multipart==0.0.32
+pywebpush==2.5.0
+cryptography==50.0.0
+psycopg[binary]==3.3.6
+psycopg-pool==3.3.3

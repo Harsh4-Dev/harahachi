@@ -1,13 +1,19 @@
 // Pairing at the Sekisho checkpoint (関所). Scan the admin QR with the camera
-// (qr-scanner) or fall back to pasting the token. The app defaults to
-// same-origin (nginx serves both app + API), so a server URL is optional — only
-// needed for dev when the API lives elsewhere. A "try demo" button skips
+// (qr-scanner) or fall back to pasting the token. A "try demo" button skips
 // pairing entirely with stubbed data.
+//
+// v4 (Vercel): the PWA is served from the same origin as the API, so its manual
+// form needs only the code (a different checkpoint address is tucked behind a
+// disclosure for development). The APK (isNativeShell) has no usable origin and
+// MUST be given the stable https:// deployment address — from the QR or typed.
+// Every address is normalised by lib/serverUrl (https only, except localhost).
+// This screen and the keeper screen are the only places addresses appear.
 
 import { useEffect, useRef, useState } from 'react';
 import QrScanner from 'qr-scanner';
 import { claimPairing, ApiError } from '../api/http';
 import { isNativeShell } from '../api/storage';
+import { normalizeServerUrl } from '../lib/serverUrl';
 import { useApp } from '../state/AppContext';
 
 interface QrPayload {
@@ -37,6 +43,10 @@ export function Pairing() {
   const [serverUrl, setServerUrl] = useState('');
   const [busy, setBusy] = useState(false);
   const [camError, setCamError] = useState<string | null>(null);
+  const [urlError, setUrlError] = useState<string | null>(null);
+  const native = isNativeShell();
+  // PWA: the address field is optional and hidden until asked for.
+  const [showAddress, setShowAddress] = useState(native);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const scannerRef = useRef<QrScanner | null>(null);
 
@@ -75,16 +85,31 @@ export function Pairing() {
 
   const doClaim = async (tok: string, url?: string) => {
     if (busy) return;
-    // Priority: scanned/typed URL → manual serverUrl field → same-origin.
+    // Priority: scanned/typed URL → manual address field → same-origin.
     // In the native shell (APK) same-origin is unusable, so a URL is required.
-    const chosen = url || serverUrl || (isNativeShell() ? '' : window.location.origin);
-    if (!chosen) {
-      toast('Enter the checkpoint server URL (from the pairing QR).', 'warn');
+    const typed = url || serverUrl.trim();
+    let base: string;
+    if (typed) {
+      const n = normalizeServerUrl(typed);
+      if (!n.ok) {
+        setUrlError(n.error);
+        setShowAddress(true);
+        setScanning(false);
+        setManual(true);
+        return;
+      }
+      base = n.url;
+    } else if (native) {
+      setUrlError('Enter the checkpoint address — it’s shown with the pairing QR.');
+      setShowAddress(true);
+      setScanning(false);
       setManual(true);
       return;
+    } else {
+      base = window.location.origin;
     }
+    setUrlError(null);
     setBusy(true);
-    const base = chosen.replace(/\/+$/, '');
     try {
       const { device_id, device_key } = await claimPairing(base, tok.trim(), deviceName());
       finishPairing({ baseUrl: base, deviceKey: device_key, deviceId: device_id });
@@ -93,8 +118,10 @@ export function Pairing() {
       const msg =
         e instanceof ApiError
           ? e.status === 0
-            ? 'Sekisho is unreachable — check the server URL or your connection.'
-            : e.message
+            ? typed
+              ? 'Sekisho is unreachable — check the checkpoint address or your connection.'
+              : 'Sekisho is unreachable — check your connection.'
+            : e.message || 'Pairing failed.'
           : 'Pairing failed.';
       setBusy(false);
       // Shared error surface: retry the claim, or fall back to typing the code.
@@ -124,8 +151,8 @@ export function Pairing() {
             <div className="ob-kanji">関所</div>
             <h1 className="display ob-title">Pair with the checkpoint</h1>
             <p className="muted">
-              On the laptop, open the Sekisho admin page and choose <em>Pair new device</em>. Point your camera at the
-              QR, or type the code.
+              On any computer, open the checkpoint’s admin page and choose <em>Pair new device</em>. Point your camera
+              at the QR, or type the code{native ? ' and the checkpoint address shown with it' : ''}.
             </p>
 
             {scanning ? (
@@ -148,19 +175,50 @@ export function Pairing() {
                     autoFocus
                   />
                 </div>
-                <div className="field">
-                  <label>
-                    Server URL <span className="muted">(optional — leave blank for same network)</span>
-                  </label>
-                  <input
-                    className="input"
-                    value={serverUrl}
-                    onChange={(e) => setServerUrl(e.target.value)}
-                    placeholder="https://192.168.137.1"
-                    inputMode="url"
-                  />
-                </div>
-                <button className="btn btn-primary" style={{ width: '100%' }} onClick={submitManual} disabled={busy || !token.trim()}>
+                {showAddress ? (
+                  <div className="field">
+                    <label>
+                      Checkpoint address{' '}
+                      {!native && <span className="muted">(optional — leave blank for this site)</span>}
+                    </label>
+                    <input
+                      className="input"
+                      value={serverUrl}
+                      onChange={(e) => {
+                        setServerUrl(e.target.value);
+                        setUrlError(null);
+                      }}
+                      onBlur={() => {
+                        // Show the cleaned-up form so the user sees what will be used.
+                        if (!serverUrl.trim()) return;
+                        const n = normalizeServerUrl(serverUrl);
+                        if (n.ok) setServerUrl(n.url);
+                        else setUrlError(n.error);
+                      }}
+                      placeholder="https://your-checkpoint.vercel.app"
+                      inputMode="url"
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                      spellCheck={false}
+                      aria-invalid={!!urlError}
+                    />
+                    {urlError && (
+                      <div className="small" role="alert" style={{ color: 'var(--shu)', marginTop: 6 }}>
+                        {urlError}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <button className="link-btn" style={{ marginBottom: 10 }} onClick={() => setShowAddress(true)}>
+                    Pairing with a different checkpoint?
+                  </button>
+                )}
+                <button
+                  className="btn btn-primary"
+                  style={{ width: '100%' }}
+                  onClick={submitManual}
+                  disabled={busy || !token.trim() || (native && !serverUrl.trim())}
+                >
                   {busy ? 'Pairing…' : 'Pair device'}
                 </button>
                 <button className="btn btn-ghost" style={{ width: '100%', marginTop: 8 }} onClick={() => setManual(false)}>

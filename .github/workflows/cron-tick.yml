@@ -1,0 +1,52 @@
+# Drives Sekisho's push-reminder scheduler on Vercel (see DEPLOY_VERCEL.md).
+#
+# Vercel Hobby crons may run at most once per day, so this workflow calls the
+# idempotent GET /api/cron/tick endpoint every 15 minutes instead.
+#
+# Setup (repo -> Settings -> Secrets and variables -> Actions):
+#   * Secret   CRON_SECRET  = the same value as the Vercel env var CRON_SECRET
+#   * Variable SEKISHO_URL  = https://<project>.vercel.app   (no trailing slash)
+# Until SEKISHO_URL is set, every run is skipped (the job never starts).
+#
+# GitHub may delay scheduled runs (often 5-30 min at busy times) or skip some.
+# For punctual reminders use cron-job.org instead (free) - see DEPLOY_VERCEL.md.
+name: Sekisho cron tick
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: sekisho-cron-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    if: ${{ vars.SEKISHO_URL != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Call /api/cron/tick
+        env:
+          SEKISHO_URL: ${{ vars.SEKISHO_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CRON_SECRET}" ]; then
+            echo "::error::Repository secret CRON_SECRET is not set."
+            exit 1
+          fi
+          url="${SEKISHO_URL%/}/api/cron/tick"
+          code=$(curl --silent --show-error --output body.txt --write-out '%{http_code}' \
+            --max-time 120 --retry 2 --retry-delay 10 --retry-all-errors \
+            -H "Authorization: Bearer ${CRON_SECRET}" "$url") || {
+              echo "::error::Request to $url failed (network error)."; exit 1; }
+          echo "HTTP $code"
+          head -c 2000 body.txt; echo
+          if [ "$code" -lt 200 ] || [ "$code" -ge 300 ]; then
+            echo "::error::Cron tick returned HTTP $code (401 = CRON_SECRET mismatch, 503 = server misconfigured)."
+            exit 1
+          fi

@@ -14,15 +14,19 @@ following [`../DESIGN.md`](../DESIGN.md).
 ```bash
 cd app
 npm install
-npm run dev        # http://localhost:5173  (also exposed on your LAN)
+npm run dev        # http://localhost:5173
 ```
 
 - `npm run build` — type-check (strict) + production build into `dist/`.
 - `npm run preview` — serve the built `dist/` locally (http://localhost:4173).
 - `npm run typecheck` — types only, no emit.
-
-The dev server binds to `0.0.0.0`, so you can also open it from a phone on the
-same network at `http://<your-laptop-ip>:5173/`.
+- `node --experimental-strip-types scripts/v4.check.mjs` — node checks for the
+  v4 helpers (image-size maths, pasted-address normalisation, error mapping).
+  The full photo pipeline runs in the dev-server console:
+  `await window.__hhImagePrepCheck()`.
+- Dev-only fault injection (demo mode): `localStorage.setItem('hh.demoFault',
+  '413' | '429' | '503' | '401')` makes the demo's photo/chat calls fail like
+  the real server, to exercise every error popup.
 
 ---
 
@@ -50,28 +54,30 @@ store), and a deterministic **body-photo estimate** — no server required.
 
 ---
 
-## Installing on a phone (production, via the Windows Mobile Hotspot)
+## Installing on a phone (production, on Vercel)
 
-The server now ships as **one Docker container behind a Cloudflare Tunnel**
-(see `../API.md` and `../README.md`). The container serves this app *and* the
-API, and the tunnel gives it a public `https://…trycloudflare.com` URL with a
-real TLS cert — so PWA install and the camera's secure-context requirement work
-from anywhere, no port-forwarding.
+The checkpoint runs on **Vercel** (`../API.md` → *v4: Vercel deployment, NVIDIA
+NIM only*): one project serves this app (`app/dist`) **and** the API from the
+same stable address, `https://<project>.vercel.app`, with a real TLS cert — so
+PWA install and the camera's secure-context requirement just work.
 
-1. On the laptop: `cd ../app && npm run build`, then build/run the server image
-   (`docker build -t harahachi . && docker run -p 80:80 -v hh-data:/data harahachi`
-   from `../server`). The logs print the public `https://…trycloudflare.com`
-   URL.
-2. On the phone (anywhere): open that tunnel URL in the browser, then use the
-   browser menu → **"Add to Home Screen"** / **"Install app"**. You now have a
-   full-screen phone app with camera access.
-3. LAN/hotspot still works too: open `http://<laptop-ip>/` on the same network.
+1. Open `https://<project>.vercel.app` on the phone, then use the browser menu
+   → **"Add to Home Screen"** / **"Install app"**. You now have a full-screen
+   phone app with camera access.
+2. Pair it (below). The installed PWA is **same-origin** with the API, so it
+   only needs the pairing code — no address to type.
+3. Or install the **APK** (below) and pair it to the same `https://` address.
 
-Because the tunnel URL is usually **not** the app's own origin, pairing carries
-the server base URL in the QR (below) and the app always talks to that stored
-URL once paired — falling back to same-origin only when unpaired on the web.
-Inside the **APK** (Capacitor WebView) same-origin is `https://localhost`, which
-can't reach the API, so a paired server URL is *required* there.
+Inside the **APK** (Capacitor WebView) the page origin is `https://localhost`,
+which can't reach the API, so the APK must be paired with the deployment
+address — it comes in the QR, or you type it once. The APK only talks to an
+`https://` checkpoint (plain `http://` is refused except for `localhost`
+during development).
+
+> **Moving from the old Docker/tunnel setup?** Devices must re-pair to the new
+> address. The first request with an old device key gets a 401 and the app
+> shows **"This phone needs to be paired again"** → Pairing (your account and
+> history come across with the server's data migration).
 
 ---
 
@@ -81,18 +87,26 @@ First launch runs a short onboarding scroll (the *tegata* travel permit) — nam
 → body stats → **body diagram** (body-fat now/goal) → activity + goal — then the
 pairing screen, and finally **account creation** (below):
 
-1. On the laptop, open the Sekisho admin page (`/admin`) → **Pair new device**.
-   A short-lived QR appears (valid 5 minutes).
+1. On any computer, open the checkpoint's admin page
+   (`https://<project>.vercel.app/admin`) → **Pair new device**. A short-lived
+   QR appears (valid 5 minutes) together with the deployment address.
 2. In the app, tap **Scan QR with camera** and point it at the QR, **or** tap
    **Enter code manually** and paste the token.
-   - The QR embeds the **server base URL** (the tunnel URL). That stored URL is
-     what every later API call uses. You only need the manual **Server URL**
-     field when typing the code by hand, or on a plain LAN where the QR omits a
-     URL and you're browsing same-origin. In the APK a server URL is mandatory.
-3. On success the device key **and base URL** are stored in `localStorage` and
+   - The QR embeds the **checkpoint address** (the Vercel URL). That stored
+     address is what every later API call uses.
+   - **PWA:** manual entry needs only the code — it pairs with the site it was
+     opened from. (*"Pairing with a different checkpoint?"* reveals an optional
+     address field for development.)
+   - **APK:** the **Checkpoint address** field is required when typing the code
+     by hand. Pasted addresses are cleaned up: whitespace trimmed, `https://`
+     added when missing, trailing slashes and pasted `/admin` or `/api/v1`
+     suffixes dropped; `http://` is rejected (except `localhost`) with a clear
+     message.
+3. On success the device key **and address** are stored in `localStorage` and
    your onboarding profile is pushed to the server (`PUT /profile`).
 
-Re-pair or check pairing status any time from the **Tegata 手形** station.
+Addresses only ever appear on the pairing and keeper screens. Re-pair any time
+from the **Tegata 手形** station (demo mode: *Connect to a checkpoint*).
 
 ---
 
@@ -112,7 +126,9 @@ credential (`../API.md` v2). The flow:
   (`POST /auth/logout` → login screen) and **Switch account** (log in as someone
   else).
 - **Global 401 handling** — any `401 {code:"no_user"}` from the server routes the
-  whole app back to the login screen.
+  whole app back to the login screen. A `401` for an **unknown or revoked
+  device key** (`invalid_key`) drops the dead pairing + active user + all
+  volatile caches and shows **"This phone needs to be paired again"** → Pairing.
 - **Data isolation** — cached day-data is namespaced by user id, and **all
   volatile caches (day data, offline queue, drafts, demo state) are cleared on
   logout / account switch**, so a fresh account never sees the previous
@@ -173,9 +189,20 @@ suggested regular meal. The toggle explains the fallback rather than failing.
   code manually" for pairing, "pick from diagram" for the body photo).
 - **Client-side timeouts on every call** (`AbortController`): analyze /
   body-photo 65 s, everything else 12 s. **No spinner outlives its timeout.**
-- **Server down / offline** → "Sekisho is unreachable — check the server or your
-  connection." Meal/workout logs still **enqueue offline** and sync on reconnect,
-  and the toast says so.
+- **Server down / offline** → "Sekisho is unreachable — check your connection
+  and try again." Meal/workout logs still **enqueue offline** and sync on
+  reconnect, and the toast says so.
+- **AI photo / chat errors (v4, NVIDIA NIM behind Vercel)** — mapped in
+  `src/api/errors.ts`:
+  - `413` → "That photo is too large — try again" (Retry re-sends a smaller
+    768 px / 100 KB version).
+  - `429` daily AI cap → "You've reached today's AI limit — log manually or try
+    tomorrow" with **Log manually** (no pointless retry). A plain per-minute
+    `429` says to wait a moment and offers Retry.
+  - `503` provider unavailable → friendly "resting right now" copy with Retry +
+    manual entry. No screen mentions the mock or back-end internals.
+- The error popup sits above the full-screen camera views, so capture failures
+  are always visible.
 - **Chat failure** → tap-to-retry on the bubble; **barcode / analyze failure** →
   retry or manual entry; **pairing failure** → retry or re-scan.
 - **Global error boundary** — a render crash shows a glass "something broke —
@@ -222,6 +249,15 @@ the feed is glass — the food is the background (DESIGN.md §6.5).
 
 - **Glass top ribbon** (茶屋 Chaya · Capture, close ✕) + **glass bottom bar**
   (shutter ring, gallery button, 料理 **Dish** / バーコード **Barcode** toggle).
+- **Photo downscaling (every upload)** — dish photos, body photos and gallery
+  picks go through `src/lib/imagePrep.ts` first: decoded with
+  `createImageBitmap(…, {imageOrientation: 'from-image'})` (EXIF-upright,
+  `<img>` fallback), long edge ≤ 1024 px, JPEG at quality 0.82 → 0.72 → 0.62 →
+  0.5, then long edge 896 → 768 → 640, until the upload is **≤ 170 KB** (NVIDIA's
+  hosted API rejects large inline images; the server re-encodes as a safety
+  net). The re-encode also strips EXIF/GPS. Only the upload shrinks: the
+  frozen preview keeps the full-resolution frame, and because the scale is
+  uniform the model's normalized 0..1 item points pin to the same spots.
 - **Dish mode** — shutter freezes the frame → "reading the dish…" shimmer while
   it POSTs to `/meals/analyze` → the response renders as **floating glass
   overlay cards** over the photo: a title card (editable dish + confidence), one
@@ -240,8 +276,8 @@ the feed is glass — the food is the background (DESIGN.md §6.5).
   gallery"). In a desktop browser without camera permission you'll see exactly
   this card; the whole overlay flow still works through the gallery path.
 
-The camera needs a **secure context** (HTTPS or `localhost`). Over the tunnel
-URL that's automatic; on a plain-HTTP LAN IP the browser will block it.
+The camera needs a **secure context** (HTTPS or `localhost`). On the Vercel
+`https://` address (and inside the APK) that's automatic.
 
 ---
 
@@ -259,7 +295,9 @@ build in `dist/` is copied into a native `android/` Gradle project.
   (`onPermissionRequest` grants `VIDEO_CAPTURE` after the Android runtime
   prompt) — no custom `MainActivity` needed for the camera.
 - Because the WebView origin is `https://localhost`, the app **cannot** use
-  same-origin API calls; it always uses the server base URL stored at pairing.
+  same-origin API calls; it always uses the `https://<project>.vercel.app`
+  address stored at pairing (the server's CORS allows `https://localhost` and
+  `capacitor://localhost`).
 
 ### Sync the web build into the native project
 
@@ -302,7 +340,8 @@ app/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
 Install it with `adb install -r app-debug.apk`, or copy it to the phone. On
-first launch, pair against the checkpoint's tunnel URL (the QR carries it).
+first launch, pair against the checkpoint's Vercel address (the QR carries it,
+or type `https://<project>.vercel.app` with the code).
 
 ---
 
@@ -320,7 +359,8 @@ app/
     App.tsx               # shell: map + ribbon + panels + toasts + error popup + routing
     sw.ts                 # custom service worker: precache + push/notificationclick
     api/                  # one typed client (http.ts / demo.ts), storage, types
-    lib/                  # targets (Mifflin-St Jeor / Katch-McArdle), format, foodParser
+    lib/                  # targets (Mifflin-St Jeor / Katch-McArdle), format, foodParser,
+                          #   imagePrep (upload downscaling), serverUrl (address cleanup)
     map/                  # SakuraMap.tsx (the centerpiece SVG) + stations layout
     state/                # AppContext (client, accounts, queue, toasts, error) + useDay
     components/           # JourneyBar, MacroPath, ErrorBoundary
@@ -330,11 +370,12 @@ app/
     chat/                 # Annai (floating chat button + full-height overlay)
     push/                 # push.ts (subscribe helpers) + ReminderBanner (in-app)
     stations/             # Honjin, Chaya, Koyomi, Dojo, Ichiba, Tegata
-    onboarding/           # Onboarding (tegata scroll) + Pairing + Account (login/create)
+    onboarding/           # Onboarding (tegata scroll) + Pairing + RePair + Account (login/create)
     styles/               # global, map, components, capture, onboarding, account CSS
 ```
 
 All server access goes through the single typed client in `src/api`
 (`HarahachiClient`); `http.ts` is the real client (with per-call `AbortController`
-timeouts and global `no_user` handling), `demo.ts` is the stub — both implement
+timeouts and global `no_user` / revoked-device handling; `errors.ts` maps
+failures to friendly copy), `demo.ts` is the stub — both implement
 the identical interface (accounts, body-photo, chat and push included).

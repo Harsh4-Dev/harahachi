@@ -205,6 +205,75 @@ existing pairing QR + glass slider.
 - **Export**: `GET /export.csv` (device auth) → all of the user's meals,
   workouts, weights, water as CSV.
 
+## v4: Vercel (Hobby/free) deployment, NVIDIA NIM only
+
+Sekisho must run as a Vercel Python serverless function AND keep running in
+the existing Docker container. Same codebase, behaviour switched by env.
+
+**Topology on Vercel:** one project at the repo root. Static app = `app/dist`
+(built by Vercel). One Python function (`api/index.py` re-exporting the
+FastAPI `app`) receives `/api/*`, `/admin*`, `/pair*`, `/llm/*` via rewrites.
+The app and API are same-origin, so the PWA needs no base URL and the APK
+pairs to a **stable** `https://<project>.vercel.app` (no more rotating tunnel URLs).
+
+**Stateless rules (no long-lived process, no writable disk, many instances):**
+- **Database:** Postgres via `DATABASE_URL` (Neon free tier through the
+  Vercel Marketplace; use its pooled connection string). SQLite remains the
+  default when `DATABASE_URL` is unset (Docker/dev/tests). One thin adapter
+  handles placeholders/DDL differences; no ORM rewrite. Migrations idempotent.
+- **Secrets from env only, fail closed:** `SEKISHO_ADMIN_PASSWORD` (required;
+  refuse admin login if unset, never auto-generate on Vercel),
+  `SEKISHO_SESSION_SECRET` (required; HMAC key for admin cookies, stable
+  across instances), `NVIDIA_API_KEY` (never stored in the DB, never returned
+  by any endpoint), `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` (+ subject),
+  `CRON_SECRET`.
+- **Rate limiting:** DB-backed fixed-window counters (per device per minute),
+  not process memory. Same 30 req/min default.
+- **Scheduler:** no background loop on Vercel. `GET /api/cron/tick` runs one
+  scheduler pass (idempotent: per-user per-slot per-day markers already
+  exist). Auth: `Authorization: Bearer $CRON_SECRET`, constant-time compare,
+  401 otherwise. Triggered every 10–15 min by an external free pinger
+  (cron-job.org or a GitHub Actions schedule); a Vercel Cron entry is kept as
+  a once-daily safety net (Hobby crons run at most daily). Docker keeps its
+  in-process loop.
+- **Request limits:** Vercel caps function request bodies (~4.5 MB) and NIM
+  caps inline base64 images. The app downscales photos before upload; the
+  server re-encodes oversized images (Pillow) to fit the NIM limit and
+  rejects anything over the function limit with a clean 413.
+- **Timeouts:** every NIM call has an explicit timeout below the function's
+  `maxDuration`, returning the standard 503 envelope, never a platform 504.
+
+**NVIDIA NIM as the only provider** (`https://integrate.api.nvidia.com/v1`,
+key from `NVIDIA_API_KEY`). Per-task model slots, each env-configurable and
+editable in the admin Backends tab (stored in DB settings, key never in DB):
+
+| Slot | Env | Default |
+|------|-----|---------|
+| `analyze` (food photo) | `NIM_MODEL_ANALYZE` | `qwen/qwen2.5-vl-72b-instruct` |
+| `body` (body-fat photo) | `NIM_MODEL_BODY` | `meta/llama-3.2-90b-vision-instruct` |
+| `chat` (Annai) | `NIM_MODEL_CHAT` | `meta/llama-3.3-70b-instruct` |
+| `insights` (weekly summary, suggestion phrasing) | `NIM_MODEL_INSIGHTS` | falls back to `chat` |
+
+Each slot may list a fallback model (same provider) tried once on failure.
+Mock responses are **off by default in production** (`SEKISHO_ALLOW_MOCK=0`
+unless explicitly set); when the provider fails the app gets the clean 503
+and shows its retry popup instead of fake numbers.
+
+**Security baseline (enforced, tested):** CORS restricted to the deployment
+origin plus `capacitor://localhost` and `https://localhost` (APK) and dev
+origins via `SEKISHO_CORS_ORIGINS`; admin cookie `Secure; HttpOnly;
+SameSite=Strict`; CSRF token on every state-changing admin request; admin
+login lockout; security headers (HSTS, CSP for the app + admin,
+X-Content-Type-Options, Referrer-Policy, frame-ancestors none) via
+`vercel.json` and middleware; backend base URLs restricted to an https
+allowlist (`integrate.api.nvidia.com` by default) to prevent SSRF; uploaded
+images validated by magic bytes, not content-type; request log stores no
+image data, PINs, keys, or chat content; per-user daily cap on `/llm/v1` and
+chat calls to protect NIM credits.
+
+**Data:** the Vercel deployment starts fresh on Neon Postgres; there is no
+DGX migration path. Phones pair to the stable `https://<project>.vercel.app` URL.
+
 ## LLM API passthrough — `/llm/v1/*` (NOT under /api/v1)
 
 OpenAI-compatible endpoint surface (`/llm/v1/chat/completions`, `/llm/v1/models`)

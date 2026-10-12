@@ -355,5 +355,5 @@ async def backend_reply(user_id: int, messages: list[dict]) -> tuple[str, dict |
     system = build_system_prompt(user_id)
     convo = [{"role": "system", "content": system}]
     convo.extend(messages)
-    raw = await backends.chat_completion(convo, max_tokens=512, temperature=0.6)
+    raw = await backends.chat_completion(convo, max_tokens=512, temperature=0.6, task="chat")
     return parse_action(raw)

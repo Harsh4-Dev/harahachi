@@ -1,0 +1,34 @@
+# Files Vercel should never upload/build/bundle (see DEPLOY_VERCEL.md).
+# Android native project + local build outputs (Vercel builds app/dist itself)
+app/android
+app/dist
+app/dev-dist
+node_modules
+app/node_modules
+**/*.tsbuildinfo
+
+# Python virtualenvs / caches
+server/.venv
+.venv
+**/__pycache__
+**/*.pyc
+
+# Local data — never ship a SQLite database or its WAL files
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.log
+.env
+.env.*
+
+# Tests + Docker-only tooling (not needed by the function)
+server/tests_smoke.py
+**/tests
+**/test_*.py
+server/tools
+server/docker
+server/nginx
+server/Dockerfile
+server/docker-entrypoint.sh
+*.zip

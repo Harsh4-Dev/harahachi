@@ -4,13 +4,18 @@
 // confidence note, "photo analyzed and discarded" line) → confirm returns the
 // chosen % to the parent (which saves via PUT /profile).
 //
-// Failure UX: analyze failure → glass card with "try again / enter manually"
-// (manual = cancel back to the tile picker). Timeouts live in the client.
+// Failure UX: analyze failure → the shared error popup with "Retry / Pick from
+// diagram" (manual = cancel back to the tile picker); the daily AI cap offers
+// only the diagram. Timeouts live in the client.
+//
+// v4: the photo is downscaled (lib/imagePrep, ≤1024px, ≤170 KB, EXIF-upright)
+// before upload; the full-res frame is only used for the on-screen preview.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCamera, type Frame } from '../capture/useCamera';
 import { useApp } from '../state/AppContext';
-import { ApiError } from '../api/http';
+import { AI_COPY, classifyApiError } from '../api/errors';
+import { prepareImageForUpload, type PrepOptions } from '../lib/imagePrep';
 import { PetalLoader } from '../components/PetalLoader';
 import type { BodyPhotoEstimate } from '../api/types';
 
@@ -21,7 +26,7 @@ interface Props {
 }
 
 export function BodyPhotoCapture({ onClose, onConfirm, reducedMotion }: Props) {
-  const { client } = useApp();
+  const { client, showError } = useApp();
   const { videoRef, status, captureFrame } = useCamera(true);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
@@ -37,7 +42,7 @@ export function BodyPhotoCapture({ onClose, onConfirm, reducedMotion }: Props) {
   }, []);
 
   const runEstimate = useCallback(
-    async (f: Frame) => {
+    async (f: Frame, prep?: PrepOptions) => {
       setFrame((prev) => {
         revoke(prev);
         return f;
@@ -45,21 +50,43 @@ export function BodyPhotoCapture({ onClose, onConfirm, reducedMotion }: Props) {
       setEstimate(null);
       setAnalyzing(true);
       try {
-        const r = await client.estimateBodyPhoto(f.blob);
+        let upload: Blob;
+        try {
+          upload = (await prepareImageForUpload(f.blob, prep)).blob;
+        } catch {
+          upload = f.blob; // undecodable here — the server re-encodes or 413s
+        }
+        const r = await client.estimateBodyPhoto(upload);
         setEstimate(r);
         setPct(Math.round(r.body_fat_pct));
       } catch (e) {
-        const net = e instanceof ApiError && e.status === 0;
         // Reset to the live feed and surface a retry/manual choice.
         revoke(f);
         setFrame(null);
         setEstimate(null);
-        setFailure(net ? 'Sekisho is unreachable — check the server or your connection.' : 'Could not read the photo.');
+        const kind = classifyApiError(e);
+        if (kind === 'device_revoked' || kind === 'no_user') return; // app is re-routing
+        if (kind === 'daily_cap') {
+          showError({ message: AI_COPY.daily_cap, secondaryLabel: 'Pick from diagram', onSecondary: onClose });
+          return;
+        }
+        const again = (p?: PrepOptions) => () => void runEstimate({ ...f, url: URL.createObjectURL(f.blob) }, p);
+        showError({
+          message:
+            kind === 'too_large' || kind === 'network' || kind === 'rate_limited'
+              ? AI_COPY[kind]
+              : kind === 'unavailable'
+                ? 'The photo reader is resting right now — try again, or pick from the diagram.'
+                : 'Could not read the photo.',
+          retry: kind === 'too_large' ? again({ maxEdge: 768, maxBytes: 100 * 1024 }) : again(prep),
+          secondaryLabel: 'Pick from diagram',
+          onSecondary: onClose,
+        });
       } finally {
         setAnalyzing(false);
       }
     },
-    [client, revoke],
+    [client, revoke, showError, onClose],
   );
 
   const [failure, setFailure] = useState<string | null>(null);
@@ -105,7 +132,7 @@ export function BodyPhotoCapture({ onClose, onConfirm, reducedMotion }: Props) {
           style={{ visibility: noCamera ? 'hidden' : 'visible' }}
         />
       )}
-      {noCamera && <div className="capture-feed capture-feed-fallback" aria-hidden />}
+      {noCamera && !frame && <div className="capture-feed capture-feed-fallback" aria-hidden />}
 
       <div className="capture-ribbon glass-ink">
         <span className="capture-title">

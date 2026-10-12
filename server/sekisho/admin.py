@@ -25,6 +25,21 @@ Endpoints (all admin-session guarded except the login/QR image):
   POST /admin/api/backends/active     -> switch active vision/text
   GET  /admin/api/push                -> subscription count
   POST /admin/api/push/test           -> send one test push now
+  GET  /admin/api/nim                 -> NIM provider + per-task model slots (key masked)
+  POST /admin/api/nim/slot            -> set a slot's model/fallback (stored in DB settings)
+  POST /admin/api/nim/test            -> 1-token ping of a slot's model
+
+v4 security (serverless-safe, enforced by tests):
+  * Session cookie = HMAC(SEKISHO_SESSION_SECRET) — valid on every instance.
+    Docker without the env falls back to a random secret persisted in the DB.
+    On Vercel the login fails CLOSED when the password/secret is missing.
+  * Cookie flags: HttpOnly; SameSite=Strict; Secure (always on Vercel, and on
+    any https request), Path=/admin.
+  * Every state-changing admin request needs the session's CSRF token
+    (X-CSRF-Token header, or csrf_token form field) and a same-host Origin.
+  * Login lockout is DB-backed (per IP + global) so it holds across instances.
+  * Admin pages carry a strict CSP with a per-request nonce for the one inline
+    script. NVIDIA_API_KEY never appears in any admin response (masked hint only).
 """
 from __future__ import annotations
 
@@ -36,6 +51,7 @@ import json
 import secrets
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 import qrcode
 from fastapi import APIRouter, Form, Request, Response
@@ -44,8 +60,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Stre
 from . import accounts, backends, db, feedback, push, security
 from .config import config
 from .net import best_pairing_host, classify_ips, public_url
+from .models import valid_date
 from .nutrition import compute_targets
-from .templates import LOGIN_HTML, dashboard_html
+from .templates import dashboard_html, login_html
 
 router = APIRouter()
 
@@ -87,7 +104,9 @@ def pairing_with_qr_png() -> dict:
 
 def revoke_device(device_id: str) -> None:
     with db.cursor() as cur:
-        cur.execute("UPDATE devices SET revoked=1 WHERE device_id=?", (device_id,))
+        cur.execute("UPDATE devices SET revoked=1, active_user_id=NULL WHERE device_id=?", (device_id,))
+    # A revoked phone must stop receiving the account's reminders too.
+    push.unsubscribe_device(device_id)
 
 
 def backends_payload() -> dict:
@@ -97,6 +116,8 @@ def backends_payload() -> dict:
         "active_text_id": summary["text"]["id"] if summary["text"] else None,
         "active_vision_id": summary["vision"]["id"] if summary["vision"] else None,
         "presets": backends.PRESETS,
+        "provider": backends.provider_mode(),
+        "nim": backends.nim_payload(),
     }
 
 
@@ -115,21 +136,38 @@ def set_active_backend(slot: str, backend_id: str) -> str | None:
     return None
 
 
+def _lock_state(lock_until, hard, now: float | None = None) -> str:
+    """'' (not locked) | 'temp' | 'hard' from an auth_locks row's columns."""
+    if hard:
+        return "hard"
+    if lock_until and int(lock_until) > int(now or time.time()):
+        return "temp"
+    return ""
+
+
 def users_list_data() -> list[dict]:
-    """User list with counts, goal, last activity, and the phone-admin flag."""
+    """User list with counts, goal, last activity, the phone-admin flag, and the
+    PIN-lockout state (failed_logins since the last success, locked)."""
     with db.cursor() as cur:
         rows = cur.execute(
             "SELECT u.id, u.username, u.created_at, u.is_admin, "
             "(SELECT COUNT(*) FROM meals m WHERE m.user_id=u.id) AS meal_count, "
             "(SELECT COUNT(*) FROM workouts w WHERE w.user_id=u.id) AS workout_count, "
             "(SELECT MAX(eaten_at) FROM meals m WHERE m.user_id=u.id) AS last_meal, "
-            "(SELECT goal FROM profiles p WHERE p.user_id=u.id) AS goal "
+            "(SELECT goal FROM profiles p WHERE p.user_id=u.id) AS goal, "
+            "(SELECT c.n FROM counters c WHERE c.bucket = 'pinfail:user:' || u.username "
+            " AND c.win = 0) AS failed_logins, "
+            "(SELECT l.lock_until FROM auth_locks l WHERE l.subject = 'user:' || u.username) AS lock_until, "
+            "(SELECT l.hard FROM auth_locks l WHERE l.subject = 'user:' || u.username) AS lock_hard "
             "FROM users u ORDER BY u.id"
         ).fetchall()
     out = []
+    now = time.time()
     for r in rows:
         d = dict(r)
         d["is_admin"] = bool(d["is_admin"])
+        d["failed_logins"] = int(d["failed_logins"] or 0)
+        d["locked"] = _lock_state(d.pop("lock_until"), d.pop("lock_hard"), now)
         out.append(d)
     return out
 
@@ -377,84 +415,208 @@ async def keeper_overview() -> dict:
     }
 
 COOKIE = "sekisho_admin"
-# Sessions signed with a per-process secret so the cookie can't be forged.
-_SESSION_SECRET = secrets.token_bytes(32)
+COOKIE_PATH = "/admin"
+SESSION_TTL = 12 * 3600
 _STARTED_AT = time.time()
 APP_VERSION = "2.0"
 
 
 def _db_size_str() -> str:
-    """Human-readable on-disk size of the SQLite DB (incl. -wal/-shm if present)."""
-    from pathlib import Path
-    try:
-        base = str(config.db_file)
-        total = sum(
-            Path(base + suffix).stat().st_size
-            for suffix in ("", "-wal", "-shm")
-            if Path(base + suffix).exists()
-        )
-    except Exception:
-        return "?"
-    size = float(total)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024.0
-    return f"{size:.1f} GB"
+    """Human-readable size of the store (SQLite file incl. -wal/-shm, or Postgres DB)."""
+    return db.size_str()
+
+
+# ---------------------------------------------------------------------------
+# Sessions: HMAC with a secret shared by every instance
+# ---------------------------------------------------------------------------
+def _session_key() -> bytes | None:
+    """HMAC key for admin cookies. Env SEKISHO_SESSION_SECRET (required on Vercel);
+    Docker/dev without it: a random secret persisted in the DB (stable across
+    restarts and workers). None => sessions impossible (fail closed)."""
+    if config.session_secret:
+        return config.session_secret.encode("utf-8")
+    if config.on_vercel:
+        return None
+    stored = db.get_setting("admin_session_secret")
+    if not stored:
+        stored = secrets.token_urlsafe(48)
+        db.set_setting("admin_session_secret", stored)
+    return stored.encode("utf-8")
+
+
+def _sign(key: bytes, purpose: str, payload: str) -> str:
+    return hmac.new(key, f"{purpose}|{payload}".encode(), hashlib.sha256).hexdigest()
 
 
 def _make_session() -> str:
-    payload = str(int(time.time()))
-    sig = hmac.new(_SESSION_SECRET, payload.encode(), hashlib.sha256).hexdigest()
-    return f"{payload}.{sig}"
+    key = _session_key()
+    if key is None:
+        raise RuntimeError("admin sessions disabled: no SEKISHO_SESSION_SECRET")
+    payload = f"{int(time.time())}.{secrets.token_hex(12)}"
+    return f"{payload}.{_sign(key, 'sess', payload)}"
+
+
+def _session_payload(token: str | None) -> str | None:
+    """The verified session payload, or None if missing/forged/expired."""
+    if not token or token.count(".") != 2:
+        return None
+    key = _session_key()
+    if key is None:
+        return None
+    payload, sig = token.rsplit(".", 1)
+    if not hmac.compare_digest(sig, _sign(key, "sess", payload)):
+        return None
+    try:
+        issued = int(payload.split(".", 1)[0])
+    except ValueError:
+        return None
+    if not (0 <= time.time() - issued < SESSION_TTL):
+        return None
+    return payload
 
 
 def _valid_session(token: str | None) -> bool:
-    if not token or "." not in token:
-        return False
-    payload, sig = token.rsplit(".", 1)
-    expected = hmac.new(_SESSION_SECRET, payload.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(sig, expected):
-        return False
-    try:
-        return (time.time() - int(payload)) < 12 * 3600  # 12h expiry
-    except ValueError:
-        return False
+    return _session_payload(token) is not None
+
+
+def csrf_token_for(session_token: str | None) -> str:
+    payload = _session_payload(session_token)
+    key = _session_key()
+    if payload is None or key is None:
+        return ""
+    return _sign(key, "csrf", payload)[:48]
 
 
 def _authed(request: Request) -> bool:
     return _valid_session(request.cookies.get(COOKIE))
 
 
+def _is_https(request: Request) -> bool:
+    if request.url.scheme == "https":
+        return True
+    peer = request.client.host if request.client else ""
+    if config.on_vercel or peer in ("127.0.0.1", "::1"):
+        if request.headers.get("x-forwarded-proto", "").lower() == "https":
+            return True
+        if '"https"' in request.headers.get("cf-visitor", ""):
+            return True
+    return False
+
+
+def _same_origin(request: Request) -> bool:
+    """Reject cross-site form/fetch posts. A missing Origin is tolerated (non-browser
+    clients); the CSRF token is still required for every state change."""
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "")
+    try:
+        return (urlsplit(origin).hostname or "").lower() == (urlsplit("//" + host).hostname or "").lower()
+    except ValueError:
+        return False
+
+
+def admin_csp(nonce: str) -> str:
+    return (
+        "default-src 'self'; "
+        f"script-src 'nonce-{nonce}'; "
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+        "font-src 'self' https://fonts.gstatic.com data:; "
+        "img-src 'self' data: blob:; "
+        "connect-src 'self'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+    )
+
+
+def _html(body: str, status: int = 200, nonce: str | None = None) -> HTMLResponse:
+    nonce = nonce or secrets.token_urlsafe(16)
+    resp = HTMLResponse(body, status_code=status)
+    resp.headers["Content-Security-Policy"] = admin_csp(nonce)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 # ---------------------------------------------------------------------------
 # Auth pages
 # ---------------------------------------------------------------------------
+def _login_page(message: str = "", status: int = 200) -> HTMLResponse:
+    reason = config.admin_login_disabled_reason()
+    if reason:
+        return _html(login_html(reason, disabled=True, on_vercel=config.on_vercel),
+                     status=503 if status == 200 else status)
+    return _html(login_html(message, on_vercel=config.on_vercel), status=status)
+
+
 @router.get("/admin", response_class=HTMLResponse)
 async def admin_index(request: Request):
-    if not _authed(request):
-        return HTMLResponse(LOGIN_HTML)
-    return HTMLResponse(dashboard_html())
+    token = request.cookies.get(COOKIE)
+    if not _valid_session(token):
+        return _login_page()
+    nonce = secrets.token_urlsafe(16)
+    return _html(dashboard_html(nonce=nonce, csrf=csrf_token_for(token)), nonce=nonce)
 
 
 @router.post("/admin/login")
 async def admin_login(request: Request, password: str = Form(...)):
-    if config.admin_password and hmac.compare_digest(password, config.admin_password):
+    reason = config.admin_login_disabled_reason()
+    if reason:
+        return _html(login_html(reason, disabled=True, on_vercel=config.on_vercel), status=503)
+    if not _same_origin(request):
+        return _html(login_html("Cross-site login blocked.", on_vercel=config.on_vercel), status=403)
+    ip = security.client_ip(request)
+    wait = security.admin_locked(ip)
+    if wait:
+        return _html(login_html(f"Too many failed attempts. Try again in {wait // 60 + 1} min.",
+                                on_vercel=config.on_vercel), status=429)
+    if hmac.compare_digest(password.encode("utf-8"), config.admin_password.encode("utf-8")):
+        security.admin_login_succeeded(ip)
         resp = RedirectResponse("/admin", status_code=303)
-        resp.set_cookie(COOKIE, _make_session(), httponly=True, samesite="lax", max_age=12 * 3600)
+        resp.set_cookie(COOKIE, _make_session(), max_age=SESSION_TTL, path=COOKIE_PATH,
+                        httponly=True, samesite="strict",
+                        secure=config.on_vercel or _is_https(request))
         return resp
-    return HTMLResponse(LOGIN_HTML.replace("<!--ERR-->", "Incorrect password."), status_code=401)
+    security.admin_login_failed(ip)
+    return _html(login_html("Incorrect password.", on_vercel=config.on_vercel), status=401)
 
 
 @router.post("/admin/logout")
-async def admin_logout():
+async def admin_logout(request: Request):
+    guard = await _guard_write(request)
+    if guard:
+        # An unauthenticated/forged logout is harmless: just bounce to the login page.
+        return RedirectResponse("/admin", status_code=303)
     resp = RedirectResponse("/admin", status_code=303)
-    resp.delete_cookie(COOKIE)
+    resp.delete_cookie(COOKIE, path=COOKIE_PATH, httponly=True, samesite="strict",
+                       secure=config.on_vercel or _is_https(request))
     return resp
 
 
 def _guard(request: Request) -> JSONResponse | None:
     if not _authed(request):
         return JSONResponse({"error": {"code": "unauthorized", "message": "login required"}}, status_code=401)
+    return None
+
+
+async def _guard_write(request: Request) -> JSONResponse | None:
+    """Session + same-origin + CSRF token, for every state-changing admin route."""
+    token = request.cookies.get(COOKIE)
+    if not _valid_session(token):
+        return JSONResponse({"error": {"code": "unauthorized", "message": "login required"}}, status_code=401)
+    if not _same_origin(request):
+        return JSONResponse({"error": {"code": "csrf_failed", "message": "cross-site request blocked"}},
+                            status_code=403)
+    sent = request.headers.get("x-csrf-token", "")
+    if not sent:
+        try:
+            form = await request.form()
+            sent = str(form.get("csrf_token") or "")
+        except Exception:
+            sent = ""
+    expected = csrf_token_for(token)
+    if not sent or not expected or not hmac.compare_digest(sent, expected):
+        return JSONResponse({"error": {"code": "csrf_failed", "message": "missing or invalid CSRF token"}},
+                            status_code=403)
     return None
 
 
@@ -490,11 +652,17 @@ async def admin_state(request: Request):
             dict(r)
             for r in cur.execute(
                 "SELECT d.device_id, d.name, d.created_at, d.last_seen, d.req_count, "
-                "d.revoked, d.active_user_id, u.username AS active_username "
+                "d.revoked, d.active_user_id, u.username AS active_username, "
+                "l.lock_until AS pin_lock_until, l.hard AS pin_lock_hard "
                 "FROM devices d LEFT JOIN users u ON u.id = d.active_user_id "
+                "LEFT JOIN auth_locks l ON l.subject = 'dev:' || d.device_id "
                 "ORDER BY d.created_at DESC"
             ).fetchall()
         ]
+    _now = time.time()
+    for d in devices:
+        d["pin_locked"] = _lock_state(d.pop("pin_lock_until"), d.pop("pin_lock_hard"), _now)
+    with db.cursor() as cur:
         logs = [
             dict(r)
             for r in cur.execute(
@@ -504,7 +672,7 @@ async def admin_state(request: Request):
                 "ORDER BY rl.id DESC LIMIT 200"
             ).fetchall()
         ]
-    ips = classify_ips()
+    ips = {"lan": [], "tailscale": [], "other": []} if config.on_vercel else classify_ips()
     return {
         "backend": {
             "connected": connected,
@@ -515,7 +683,10 @@ async def admin_state(request: Request):
             "enabled": summary["enabled_count"],
             "mode": "connected" if connected else "mock",
             "allow_mock": config.allow_mock,
+            "provider": backends.provider_mode(),
         },
+        "deployment": "vercel" if config.on_vercel else "docker",
+        "db_kind": db.backend_kind(),
         "devices": devices,
         "logs": logs,
         "ips": ips,
@@ -532,7 +703,7 @@ async def admin_state(request: Request):
 
 @router.post("/admin/api/pair")
 async def admin_pair(request: Request):
-    guard = _guard(request)
+    guard = await _guard_write(request)
     if guard:
         return guard
     return make_pairing()
@@ -553,11 +724,21 @@ async def admin_qr(request: Request, token: str):
 
 @router.post("/admin/api/revoke")
 async def admin_revoke(request: Request, device_id: str = Form(...)):
-    guard = _guard(request)
+    guard = await _guard_write(request)
     if guard:
         return guard
     revoke_device(device_id)
     return {"ok": True}
+
+
+@router.post("/admin/api/devices/unlock")
+async def admin_device_unlock(request: Request, device_id: str = Form(...)):
+    """Clear a device's PIN-failure count + lock (CSRF-protected)."""
+    guard = await _guard_write(request)
+    if guard:
+        return guard
+    accounts.unlock_device(device_id)
+    return {"ok": True, "device_id": device_id}
 
 
 # ---------------------------------------------------------------------------
@@ -589,16 +770,31 @@ async def admin_user_full(request: Request, user_id: int,
     guard = _guard(request)
     if guard:
         return guard
+    if day is not None and day != "" and not valid_date(day):
+        return JSONResponse({"error": {"code": "bad_date", "message": "day must be YYYY-MM-DD"}},
+                            status_code=400)
     data = user_page_data(user_id, page=page, per_page=per_page, day=day)
     if data is None:
         return JSONResponse({"error": {"code": "not_found", "message": "no such user"}}, status_code=404)
     return data
 
 
+@router.post("/admin/api/users/{user_id}/unlock")
+async def admin_user_unlock(request: Request, user_id: int):
+    """Clear a user's PIN-failure count + lock, including the hard lock applied
+    after 20 wrong PINs (CSRF-protected like every admin write)."""
+    guard = await _guard_write(request)
+    if guard:
+        return guard
+    if not accounts.unlock(user_id):
+        return JSONResponse({"error": {"code": "not_found", "message": "no such user"}}, status_code=404)
+    return {"ok": True, "id": user_id, "locked": "", "failed_logins": 0}
+
+
 @router.post("/admin/api/users/{user_id}/admin")
 async def admin_user_set_admin(request: Request, user_id: int, is_admin: str = Form(...)):
     """Grant/revoke the phone-admin ("keeper") flag for a user from the dashboard."""
-    guard = _guard(request)
+    guard = await _guard_write(request)
     if guard:
         return guard
     value = is_admin in ("1", "true", "on", "yes")
@@ -625,16 +821,19 @@ async def admin_backend_create(
     model: str = Form(...), api_key: str = Form(default=""),
     vision: str = Form(default="0"), enabled: str = Form(default="1"),
 ):
-    guard = _guard(request)
+    guard = await _guard_write(request)
     if guard:
         return guard
-    if kind not in ("vllm", "nvidia", "lmstudio", "openai"):
+    if kind not in backends.BACKEND_KINDS:
         return JSONResponse({"error": {"code": "bad_kind", "message": "invalid backend kind"}}, status_code=400)
-    b = backends.create_backend(
-        name=name.strip(), kind=kind, base_url=base_url.strip(),
-        api_key=(api_key.strip() or None), model=model.strip(),
-        vision=vision in ("1", "true", "on"), enabled=enabled in ("1", "true", "on"),
-    )
+    try:
+        b = backends.create_backend(
+            name=name.strip(), kind=kind, base_url=base_url.strip(),
+            api_key=(api_key.strip() or None), model=model.strip(),
+            vision=vision in ("1", "true", "on"), enabled=enabled in ("1", "true", "on"),
+        )
+    except backends.BackendURLNotAllowed as e:
+        return JSONResponse({"error": {"code": "backend_url_not_allowed", "message": str(e)}}, status_code=400)
     return {"ok": True, "backend": b}
 
 
@@ -646,27 +845,35 @@ async def admin_backend_update(
     api_key: str = Form(default=None), vision: str = Form(default=None),
     enabled: str = Form(default=None),
 ):
-    guard = _guard(request)
+    guard = await _guard_write(request)
     if guard:
         return guard
     fields: dict = {}
     if name is not None:
         fields["name"] = name.strip()
     if kind is not None:
+        if kind not in backends.BACKEND_KINDS:
+            return JSONResponse({"error": {"code": "bad_kind", "message": "invalid backend kind"}},
+                                status_code=400)
         fields["kind"] = kind
     if base_url is not None:
         fields["base_url"] = base_url.strip()
     if model is not None:
         fields["model"] = model.strip()
-    if api_key is not None:
-        # Empty string clears the key; a value sets it.
-        fields["api_key"] = api_key.strip() or None
+    # Newer FastAPI coerces an EMPTY form field to its default (None), so detect
+    # "api_key was sent" from the raw form: empty string clears, a value sets.
+    raw_form = await request.form()
+    if "api_key" in raw_form:
+        fields["api_key"] = str(raw_form.get("api_key") or "").strip() or None
     if vision is not None:
         fields["vision"] = vision in ("1", "true", "on")
     if enabled is not None:
         fields["enabled"] = enabled in ("1", "true", "on")
     # api_key=None is a legit "clear"; update_backend skips None, so handle specially.
-    updated = backends.update_backend(bid, **{k: v for k, v in fields.items() if v is not None or k == "api_key"})
+    try:
+        updated = backends.update_backend(bid, **{k: v for k, v in fields.items() if v is not None or k == "api_key"})
+    except backends.BackendURLNotAllowed as e:
+        return JSONResponse({"error": {"code": "backend_url_not_allowed", "message": str(e)}}, status_code=400)
     if "api_key" in fields and fields["api_key"] is None:
         with db.cursor() as cur:
             cur.execute("UPDATE backends SET api_key=NULL WHERE id=?", (bid,))
@@ -678,7 +885,7 @@ async def admin_backend_update(
 
 @router.post("/admin/api/backends/{bid}/delete")
 async def admin_backend_delete(request: Request, bid: int):
-    guard = _guard(request)
+    guard = await _guard_write(request)
     if guard:
         return guard
     backends.delete_backend(bid)
@@ -687,7 +894,7 @@ async def admin_backend_delete(request: Request, bid: int):
 
 @router.post("/admin/api/backends/{bid}/test")
 async def admin_backend_test(request: Request, bid: int):
-    guard = _guard(request)
+    guard = await _guard_write(request)
     if guard:
         return guard
     result = await backends.test_backend(bid)
@@ -696,13 +903,47 @@ async def admin_backend_test(request: Request, bid: int):
 
 @router.post("/admin/api/backends/active")
 async def admin_backend_active(request: Request, slot: str = Form(...), backend_id: str = Form(...)):
-    guard = _guard(request)
+    guard = await _guard_write(request)
     if guard:
         return guard
     err_code = set_active_backend(slot, backend_id)
     if err_code:
         return JSONResponse({"error": {"code": err_code, "message": "slot must be text|vision"}}, status_code=400)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# NVIDIA NIM model slots (v4)
+# ---------------------------------------------------------------------------
+@router.get("/admin/api/nim")
+async def admin_nim(request: Request):
+    guard = _guard(request)
+    if guard:
+        return guard
+    return backends.nim_payload()
+
+
+@router.post("/admin/api/nim/slot")
+async def admin_nim_slot(request: Request, task: str = Form(...), model: str = Form(default=""),
+                         fallback: str = Form(default="")):
+    guard = await _guard_write(request)
+    if guard:
+        return guard
+    try:
+        slot = backends.set_slot(task, model, fallback)
+    except ValueError as e:
+        code = str(e) if str(e) in ("bad_task", "bad_model") else "bad_request"
+        msg = "task must be analyze|body|chat|insights" if code == "bad_task" else "invalid model id"
+        return JSONResponse({"error": {"code": code, "message": msg}}, status_code=400)
+    return {"ok": True, "slot": slot}
+
+
+@router.post("/admin/api/nim/test")
+async def admin_nim_test(request: Request, task: str = Form(...)):
+    guard = await _guard_write(request)
+    if guard:
+        return guard
+    return await backends.test_nim_slot(task)
 
 
 # ---------------------------------------------------------------------------
@@ -722,7 +963,7 @@ async def admin_push_test(request: Request, user_id: str = Form(default="")):
 
     Dead endpoints (404/410) are pruned by push.send_to_subscriptions.
     """
-    guard = _guard(request)
+    guard = await _guard_write(request)
     if guard:
         return guard
     target_uid: int | None = None

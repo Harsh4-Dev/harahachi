@@ -9,7 +9,7 @@ import sys
 
 import uvicorn
 
-from . import accounts, db
+from . import db
 from .config import config
 from .net import classify_ips
 
@@ -46,7 +46,10 @@ def _banner() -> None:
         print(f"  Admin PW  : {config.admin_password}   (generated — set SEKISHO_ADMIN_PASSWORD to fix)")
     else:
         print(f"  Admin PW  : (from SEKISHO_ADMIN_PASSWORD)")
-    if config.vllm_url:
+    print(f"  Database  : {db.backend_kind()}")
+    if config.provider_mode() == "nim":
+        print(f"  LLM       : NVIDIA NIM ({'key set' if config.nvidia_api_key else 'NVIDIA_API_KEY missing'})")
+    elif config.vllm_url:
         print(f"  vLLM      : {config.vllm_url}  model={config.vllm_model or '?'}")
     else:
         print(f"  vLLM      : not configured — mock analyzer active"
@@ -58,14 +61,7 @@ def _banner() -> None:
 def main() -> None:
     _enable_utf8_console()
     config.ensure_admin_password()
-    db.init_db(config.db_file)
-    # Grant admin to SEKISHO_ADMIN_USERS (idempotent) before serving.
-    try:
-        granted = accounts.apply_admin_users_env()
-        if granted:
-            print(f"  Admin users granted from env: {', '.join(granted)}")
-    except Exception:
-        pass
+    db.init_from_config()  # Postgres when DATABASE_URL is set, else SQLite at SEKISHO_DB_PATH
     _banner()
     # import the app after DB init so module-level code is safe
     from .app import app

@@ -10,13 +10,23 @@ This module replaces the old single-URL ``vllm_client`` internals. It exposes:
   * registry CRUD (used by admin)
   * ``chat_completion`` / ``analyze_image`` / ``passthrough_*`` used by app routes
   * ``active_summary`` for /health and the admin status card
+
+v4 adds a second provider mode, **NVIDIA NIM** (the only provider on Vercel):
+per-task model slots (analyze / body / chat / insights) resolved DB setting >
+env ``NIM_MODEL_<TASK>`` > default, each with an optional fallback model tried
+once. The key comes from ``NVIDIA_API_KEY`` only — never stored, never returned.
+Every outbound base URL passes ``check_backend_url`` (https allowlist on Vercel)
+and every request is bounded by one deadline (``SEKISHO_LLM_BUDGET``).
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
 import re
+import time
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -71,10 +81,53 @@ class BackendUnavailable(Exception):
     pass
 
 
+class BackendURLNotAllowed(ValueError):
+    """A backend base_url failed the SSRF allowlist."""
+
+
 # Back-compat alias — old code imported VLLMUnavailable.
 VLLMUnavailable = BackendUnavailable
 
 LLM_MAX_TOKENS_CAP = 1024
+BACKEND_KINDS = ("vllm", "nvidia", "lmstudio", "openai")
+
+# /llm/v1 passthrough: the only request keys forwarded upstream. Everything else
+# (n, best_of, logprobs, tools, model, ...) is dropped; n is forced to 1.
+PASSTHROUGH_KEYS = ("messages", "temperature", "top_p", "max_tokens", "stop")
+
+
+def validate_passthrough_payload(payload: dict) -> str | None:
+    """Bound a /llm/v1/chat/completions body. Returns an error message or None.
+
+    Same limits as POST /chat: <= 20 messages, <= 8000 characters in total,
+    plain-text content only."""
+    from .models import CHAT_MAX_MESSAGES, CHAT_MAX_TOTAL_CHARS
+    msgs = payload.get("messages")
+    if not isinstance(msgs, list) or not msgs:
+        return "messages must be a non-empty list"
+    if len(msgs) > CHAT_MAX_MESSAGES:
+        return f"at most {CHAT_MAX_MESSAGES} messages"
+    total = 0
+    for m in msgs:
+        if not isinstance(m, dict) or m.get("role") not in ("system", "user", "assistant") \
+                or not isinstance(m.get("content"), str):
+            return "each message needs role system|user|assistant and string content"
+        total += len(m["content"])
+    if total > CHAT_MAX_TOTAL_CHARS:
+        return f"messages exceed {CHAT_MAX_TOTAL_CHARS} characters in total"
+    for key, lo, hi in (("temperature", 0.0, 2.0), ("top_p", 0.0, 1.0)):
+        if key in payload and payload[key] is not None:
+            v = payload[key]
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+                return f"{key} must be a number in [{lo}, {hi}]"
+    stop = payload.get("stop")
+    if stop is not None:
+        stops = [stop] if isinstance(stop, str) else stop
+        if not isinstance(stops, list) or len(stops) > 4 or \
+                not all(isinstance(x, str) and len(x) <= 64 for x in stops):
+            return "stop must be a string or up to 4 short strings"
+    return None
+
 
 # Presets surfaced in the admin UI.
 PRESETS = {
@@ -83,6 +136,189 @@ PRESETS = {
     "vllm": "http://host.docker.internal:8000/v1",
     "openai": "https://api.openai.com/v1",
 }
+
+# ---------------------------------------------------------------------------
+# NVIDIA NIM per-task model slots (v4)
+# ---------------------------------------------------------------------------
+# Model IDs verified against NVIDIA's hosted API (integrate.api.nvidia.com /v1/models
+# and docs.api.nvidia.com reference pages, 2026-10). The spec's analyze default
+# `qwen/qwen2.5-vl-72b-instruct` is NOT served by the hosted API (reference page
+# 404, absent from /v1/models), so analyze uses the verified Llama 3.2 90B Vision.
+TASKS = ("analyze", "body", "chat", "insights")
+VISION_TASKS = ("analyze", "body")
+NIM_DEFAULT_MODELS = {
+    "analyze": "meta/llama-3.2-90b-vision-instruct",
+    "body": "meta/llama-3.2-90b-vision-instruct",
+    "chat": "meta/llama-3.3-70b-instruct",
+    "insights": None,  # falls back to the chat slot
+}
+NIM_DEFAULT_FALLBACKS = {
+    "analyze": "meta/llama-3.2-11b-vision-instruct",
+    "body": "meta/llama-3.2-11b-vision-instruct",
+    "chat": "meta/llama-3.2-90b-vision-instruct",
+    "insights": None,  # falls back to the chat slot's fallback
+}
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$")
+
+
+def _cfg():
+    from .config import config
+    return config
+
+
+def provider_mode() -> str:
+    return _cfg().provider_mode()
+
+
+def nim_mode() -> bool:
+    return provider_mode() == "nim"
+
+
+def valid_model_id(model: str) -> bool:
+    return bool(_MODEL_RE.match(model or ""))
+
+
+def slot_config(task: str) -> dict:
+    """Resolve a task's model + fallback: DB setting > env > default."""
+    if task not in TASKS:
+        raise ValueError(f"unknown task {task!r}")
+    env_model = (os.environ.get(f"NIM_MODEL_{task.upper()}") or "").strip() or None
+    env_fb = (os.environ.get(f"NIM_FALLBACK_{task.upper()}") or "").strip() or None
+    db_model = db.get_setting(f"nim_model_{task}")
+    db_fb = db.get_setting(f"nim_fallback_{task}")
+
+    if db_model:
+        model, source = db_model, "admin"
+    elif env_model:
+        model, source = env_model, "env"
+    elif NIM_DEFAULT_MODELS[task]:
+        model, source = NIM_DEFAULT_MODELS[task], "default"
+    else:  # insights -> chat
+        chat = slot_config("chat")
+        model, source = chat["model"], "chat"
+
+    if db_fb is not None and db_fb != "":
+        fallback = None if db_fb == "none" else db_fb
+    elif env_fb:
+        fallback = None if env_fb == "none" else env_fb
+    elif NIM_DEFAULT_FALLBACKS[task]:
+        fallback = NIM_DEFAULT_FALLBACKS[task]
+    elif task == "insights":
+        fallback = slot_config("chat")["fallback"]
+    else:
+        fallback = None
+    if fallback == model:
+        fallback = None
+    return {"task": task, "model": model, "fallback": fallback, "source": source,
+            "env_model": env_model, "default_model": NIM_DEFAULT_MODELS[task]}
+
+
+def set_slot(task: str, model: str | None, fallback: str | None) -> dict:
+    """Admin edit: empty model/fallback reverts to env/default; fallback 'none' disables."""
+    if task not in TASKS:
+        raise ValueError("bad_task")
+    model = (model or "").strip()
+    fallback = (fallback or "").strip()
+    if model and not valid_model_id(model):
+        raise ValueError("bad_model")
+    if fallback and fallback != "none" and not valid_model_id(fallback):
+        raise ValueError("bad_model")
+    if model:
+        db.set_setting(f"nim_model_{task}", model)
+    else:
+        db.delete_setting(f"nim_model_{task}")
+    if fallback:
+        db.set_setting(f"nim_fallback_{task}", fallback)
+    else:
+        db.delete_setting(f"nim_fallback_{task}")
+    return slot_config(task)
+
+
+def mask_key(key: str | None) -> str | None:
+    if not key:
+        return None
+    if len(key) <= 12:
+        return "••••"
+    return f"{key[:6]}…{key[-4:]}"
+
+
+def scrub(text: str) -> str:
+    """Remove any secret that might be echoed back in an upstream error."""
+    key = _cfg().nvidia_api_key
+    out = str(text)
+    if key:
+        out = out.replace(key, "***")
+    return out
+
+
+def nim_payload() -> dict:
+    """Admin view of the NIM provider. The key is NEVER included — only a mask."""
+    c = _cfg()
+    return {
+        "provider": provider_mode(),
+        "base_url": c.nim_base_url,
+        "key_configured": bool(c.nvidia_api_key),
+        "key_hint": mask_key(c.nvidia_api_key),
+        "allowlist": c.backend_allowlist,
+        "allowlist_enforced": c.enforce_backend_allowlist,
+        "max_image_b64": c.nim_max_image_b64,
+        "slots": {t: slot_config(t) for t in TASKS},
+    }
+
+
+# ---------------------------------------------------------------------------
+# SSRF guard
+# ---------------------------------------------------------------------------
+def check_backend_url(url: str) -> str:
+    """Validate an outbound LLM base URL. Returns the normalized URL or raises.
+
+    Always: http(s) only, no userinfo. When enforcement is on (always on Vercel):
+    https only, host must be in the allowlist, default port only.
+    """
+    c = _cfg()
+    url = (url or "").strip().rstrip("/")
+    try:
+        p = urlsplit(url)
+        port = p.port
+    except ValueError as e:
+        raise BackendURLNotAllowed(f"invalid URL: {e}")
+    if p.scheme not in ("http", "https") or not p.hostname:
+        raise BackendURLNotAllowed("base_url must be an http(s) URL")
+    if p.username or p.password:
+        raise BackendURLNotAllowed("credentials in base_url are not allowed")
+    if c.enforce_backend_allowlist:
+        if p.scheme != "https":
+            raise BackendURLNotAllowed("base_url must use https")
+        if p.hostname.lower() not in c.backend_allowlist:
+            raise BackendURLNotAllowed(
+                f"host {p.hostname!r} is not in the backend allowlist "
+                f"({', '.join(c.backend_allowlist)}); extend SEKISHO_BACKEND_ALLOWLIST to permit it")
+        if port not in (None, 443):
+            raise BackendURLNotAllowed("non-default ports are not allowed")
+    return url
+
+
+# ---------------------------------------------------------------------------
+# HTTP layer (single choke point — monkeypatched by the smoke tests)
+# ---------------------------------------------------------------------------
+async def _http_post_json(url: str, payload: dict, headers: dict, timeout: "httpx.Timeout") -> tuple[int, dict]:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        r = await client.post(url, json=payload, headers=headers)
+        try:
+            data = r.json()
+        except Exception:
+            data = None
+    return r.status_code, data
+
+
+async def _http_get_json(url: str, headers: dict, timeout: "httpx.Timeout") -> tuple[int, dict]:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        r = await client.get(url, headers=headers)
+        try:
+            data = r.json()
+        except Exception:
+            data = None
+    return r.status_code, data
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +329,8 @@ def bootstrap() -> None:
 
     Priority: ``SEKISHO_BACKENDS_JSON`` (list of backend dicts) then the legacy
     ``SEKISHO_VLLM_URL`` / ``SEKISHO_VLLM_MODEL``. Runs only when the registry is
-    empty (marker in settings) so admin edits are never clobbered.
+    empty (marker in settings) so admin edits are never clobbered. Entries that
+    fail the SSRF allowlist are skipped.
     """
     if db.get_setting("backends_bootstrapped") == "1":
         _ensure_active()
@@ -108,16 +345,19 @@ def bootstrap() -> None:
                 for it in items:
                     if not isinstance(it, dict):
                         continue
-                    create_backend(
-                        name=str(it.get("name") or it.get("kind") or "backend"),
-                        kind=str(it.get("kind") or "openai"),
-                        base_url=str(it.get("base_url") or ""),
-                        api_key=it.get("api_key"),
-                        model=str(it.get("model") or ""),
-                        vision=bool(it.get("vision", False)),
-                        enabled=bool(it.get("enabled", True)),
-                    )
-                    seeded = True
+                    try:
+                        create_backend(
+                            name=str(it.get("name") or it.get("kind") or "backend"),
+                            kind=str(it.get("kind") or "openai"),
+                            base_url=str(it.get("base_url") or ""),
+                            api_key=it.get("api_key"),
+                            model=str(it.get("model") or ""),
+                            vision=bool(it.get("vision", False)),
+                            enabled=bool(it.get("enabled", True)),
+                        )
+                        seeded = True
+                    except BackendURLNotAllowed:
+                        continue
         except Exception:
             pass
 
@@ -125,12 +365,15 @@ def bootstrap() -> None:
         legacy_url = os.environ.get("SEKISHO_VLLM_URL")
         legacy_model = os.environ.get("SEKISHO_VLLM_MODEL")
         if legacy_url and legacy_model:
-            create_backend(
-                name="vLLM (env)", kind="vllm", base_url=legacy_url,
-                api_key=os.environ.get("SEKISHO_VLLM_KEY"),
-                model=legacy_model, vision=True, enabled=True,
-            )
-            seeded = True
+            try:
+                create_backend(
+                    name="vLLM (env)", kind="vllm", base_url=legacy_url,
+                    api_key=os.environ.get("SEKISHO_VLLM_KEY"),
+                    model=legacy_model, vision=True, enabled=True,
+                )
+                seeded = True
+            except BackendURLNotAllowed:
+                pass
 
     db.set_setting("backends_bootstrapped", "1")
     _ensure_active()
@@ -161,11 +404,12 @@ def _row_to_public(r) -> dict:
 
 def create_backend(name, kind, base_url, api_key, model, vision, enabled) -> dict:
     from .security import now_iso
+    base_url = check_backend_url(base_url)
     with db.cursor() as cur:
         cur.execute(
             "INSERT INTO backends (name, kind, base_url, api_key, model, vision, enabled, created_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            (name, kind, base_url.rstrip("/"), (api_key or None), model,
+            (name, kind, base_url, (api_key or None), model,
              1 if vision else 0, 1 if enabled else 0, now_iso()),
         )
         bid = cur.lastrowid
@@ -181,7 +425,9 @@ def update_backend(bid: int, **fields) -> dict | None:
         if k not in allowed or v is None:
             continue
         if k == "base_url":
-            v = str(v).rstrip("/")
+            v = check_backend_url(str(v))
+        if k == "kind" and v not in BACKEND_KINDS:
+            raise ValueError("bad_kind")
         if k in ("vision", "enabled"):
             v = 1 if v else 0
         sets.append(f"{k}=?")
@@ -255,13 +501,27 @@ def _candidate_chain(need_vision: bool) -> list[dict]:
 
 
 def is_configured(need_vision: bool = False) -> bool:
+    if nim_mode():
+        return bool(_cfg().nvidia_api_key)
     return bool(_candidate_chain(need_vision))
 
 
 # ---------------------------------------------------------------------------
 # Active summary (health / admin)
 # ---------------------------------------------------------------------------
+def _nim_summary_entry(task: str) -> dict:
+    c = _cfg()
+    s = slot_config(task)
+    return {"id": None, "name": "NVIDIA NIM", "kind": "nvidia", "base_url": c.nim_base_url,
+            "has_key": bool(c.nvidia_api_key), "model": s["model"],
+            "vision": task in VISION_TASKS, "enabled": bool(c.nvidia_api_key)}
+
+
 def active_summary() -> dict:
+    if nim_mode():
+        on = 1 if _cfg().nvidia_api_key else 0
+        return {"text": _nim_summary_entry("chat"), "vision": _nim_summary_entry("analyze"),
+                "count": 1, "enabled_count": on, "provider": "nim"}
     text_id = _active_id(False)
     vis_id = _active_id(True)
     text = get_backend(text_id) if text_id else None
@@ -271,10 +531,13 @@ def active_summary() -> dict:
         "vision": vision,
         "count": len(list_backends()),
         "enabled_count": len(list_backends(include_disabled=False)),
+        "provider": "registry",
     }
 
 
 def active_text_model() -> str | None:
+    if nim_mode():
+        return slot_config("chat")["model"] if _cfg().nvidia_api_key else None
     bid = _active_id(False)
     b = _get_backend_full(bid) if bid else None
     return b["model"] if b else None
@@ -284,56 +547,111 @@ def active_text_model() -> str | None:
 # HTTP calls
 # ---------------------------------------------------------------------------
 def _headers(backend: dict) -> dict:
-    h = {"Content-Type": "application/json"}
+    h = {"Content-Type": "application/json", "Accept": "application/json"}
     if backend.get("api_key"):
         h["Authorization"] = f"Bearer {backend['api_key']}"
     return h
 
 
-def _timeout(op: str = "chat") -> "httpx.Timeout":
-    """Explicit httpx timeout with a short connect so a dead backend fails fast
-    (letting failover kick in), and a per-operation read/total budget so a slow
-    backend can't hang the request past the app's popup threshold.
-
-    op: 'analyze' (vision, ~60s) | 'chat' (~30s) | 'passthrough' (chat budget).
-    """
-    from .config import config
+def _op_total(op: str) -> float:
+    c = _cfg()
     if op == "analyze":
-        total = config.analyze_timeout
-    elif op in ("chat", "passthrough"):
-        total = config.chat_timeout
-    else:
-        total = config.vllm_timeout
-    return httpx.Timeout(total, connect=config.connect_timeout)
+        return c.analyze_timeout
+    if op in ("chat", "passthrough"):
+        return c.chat_timeout
+    return c.vllm_timeout
 
 
-async def _one_completion(backend: dict, messages: list[dict], max_tokens: int, temperature: float, op: str) -> str:
-    base = backend["base_url"].rstrip("/")
+def _timeout(op: str = "chat", remaining: float | None = None) -> "httpx.Timeout":
+    """Explicit httpx timeout with a short connect so a dead backend fails fast
+    (letting failover kick in), and a per-operation total that never exceeds what
+    is left of the request's LLM budget (so we answer 503, never a platform 504).
+
+    op: 'analyze' (vision) | 'chat' | 'passthrough' (chat budget).
+    """
+    c = _cfg()
+    total = _op_total(op)
+    if remaining is not None:
+        total = max(1.0, min(total, remaining))
+    return httpx.Timeout(total, connect=min(c.connect_timeout, total))
+
+
+def _new_deadline() -> float:
+    return time.monotonic() + max(5.0, _cfg().llm_budget)
+
+
+def _content_of(status: int, data) -> str:
+    if status >= 400 or not isinstance(data, dict):
+        raise BackendUnavailable(f"upstream HTTP {status}")
+    try:
+        return data["choices"][0]["message"]["content"]
+    except Exception:
+        raise BackendUnavailable("upstream response missing choices[0].message.content")
+
+
+async def _one_completion(backend: dict, messages: list[dict], max_tokens: int, temperature: float,
+                          op: str, remaining: float | None = None) -> str:
+    base = check_backend_url(backend["base_url"])
     payload = {
         "model": backend["model"],
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temperature,
     }
-    async with httpx.AsyncClient(timeout=_timeout(op)) as client:
-        r = await client.post(f"{base}/chat/completions", json=payload, headers=_headers(backend))
-        r.raise_for_status()
-        data = r.json()
-    return data["choices"][0]["message"]["content"]
+    status, data = await _http_post_json(f"{base}/chat/completions", payload, _headers(backend),
+                                         _timeout(op, remaining))
+    return _content_of(status, data)
+
+
+def _nim_backend(model: str) -> dict:
+    c = _cfg()
+    return {"base_url": c.nim_base_url, "api_key": c.nvidia_api_key, "model": model}
+
+
+async def _nim_completion(task: str, messages: list[dict], max_tokens: int, temperature: float,
+                          op: str, deadline: float) -> str:
+    c = _cfg()
+    if not c.nvidia_api_key:
+        raise BackendUnavailable("NVIDIA_API_KEY is not set")
+    s = slot_config(task)
+    models = [s["model"]] + ([s["fallback"]] if s["fallback"] else [])
+    last_err: Exception | None = None
+    for model in models:  # primary, then the slot's fallback ONCE
+        remaining = deadline - time.monotonic()
+        if remaining < 2.0:
+            break
+        try:
+            return await _one_completion(_nim_backend(model), messages, max_tokens, temperature,
+                                         op, remaining - 0.5)
+        except Exception as e:  # noqa: BLE001 — try the fallback model
+            last_err = e
+    raise BackendUnavailable(scrub(str(last_err)) if last_err else "LLM budget exhausted")
 
 
 async def chat_completion(
     messages: list[dict], *, need_vision: bool = False, max_tokens: int = 700,
-    temperature: float = 0.4, op: str = "chat",
+    temperature: float = 0.4, op: str = "chat", task: str | None = None,
 ) -> str:
-    """Run a chat completion with failover across enabled capable backends."""
+    """Run a chat completion.
+
+    NIM mode: the task's slot model, then its fallback model once.
+    Registry mode: failover across enabled capable backends (v2 behaviour).
+    Both are bounded by one per-request deadline (config.llm_budget).
+    """
+    deadline = _new_deadline()
+    if nim_mode():
+        task = task or ("analyze" if need_vision else "chat")
+        return await _nim_completion(task, messages, max_tokens, temperature, op, deadline)
     chain = _candidate_chain(need_vision)
     if not chain:
         raise BackendUnavailable("no enabled backend with the needed capability")
     last_err: Exception | None = None
     for backend in chain:
+        remaining = deadline - time.monotonic()
+        if remaining < 2.0:
+            break
         try:
-            return await _one_completion(backend, messages, max_tokens, temperature, op)
+            return await _one_completion(backend, messages, max_tokens, temperature, op, remaining - 0.5)
         except Exception as e:  # noqa: BLE001 — try the next backend
             last_err = e
             continue
@@ -363,7 +681,18 @@ def _extract_json(text: str) -> dict:
     raise BackendUnavailable("could not parse JSON from model output")
 
 
+def prepare_image(image_bytes: bytes, mime: str) -> tuple[bytes, str]:
+    """NIM mode: re-encode to an EXIF-free JPEG under the inline base64 limit.
+    Registry mode (vLLM/LM Studio): pass through unchanged."""
+    if nim_mode():
+        from . import images
+        return images.fit_for_nim(image_bytes, _cfg().nim_max_image_b64)
+    return image_bytes, mime
+
+
 async def analyze_image(image_bytes: bytes, mime: str, hint: str, portion: str) -> dict:
+    # Pillow work is CPU-bound: keep it off the event loop.
+    image_bytes, mime = await asyncio.to_thread(prepare_image, image_bytes, mime)
     b64 = base64.b64encode(image_bytes).decode("ascii")
     data_url = f"data:{mime};base64,{b64}"
     user_text = "Analyze this meal photo."
@@ -378,7 +707,8 @@ async def analyze_image(image_bytes: bytes, mime: str, hint: str, portion: str) 
             {"type": "image_url", "image_url": {"url": data_url}},
         ]},
     ]
-    content = await chat_completion(messages, need_vision=True, max_tokens=800, temperature=0.3, op="analyze")
+    content = await chat_completion(messages, need_vision=True, max_tokens=800, temperature=0.3,
+                                    op="analyze", task="analyze")
     return _extract_json(content)
 
 
@@ -388,15 +718,19 @@ async def phrase_suggestions(remaining: dict, candidates: list[dict]) -> list[di
         {"role": "system", "content": SUGGEST_SYSTEM_PROMPT},
         {"role": "user", "content": user},
     ]
-    content = await chat_completion(messages, max_tokens=600, temperature=0.5)
+    content = await chat_completion(messages, max_tokens=600, temperature=0.5, task="insights")
     data = _extract_json(content)
     return data.get("suggestions", [])
 
 
 # ---------------------------------------------------------------------------
-# /llm/v1 passthrough — uses the active TEXT backend, pins its model.
+# /llm/v1 passthrough — uses the active TEXT backend (NIM: the chat slot), pins its model.
 # ---------------------------------------------------------------------------
 def _active_text_backend_full() -> dict | None:
+    if nim_mode():
+        if not _cfg().nvidia_api_key:
+            return None
+        return _nim_backend(slot_config("chat")["model"])
     bid = _active_id(False)
     return _get_backend_full(bid) if bid else None
 
@@ -405,84 +739,117 @@ async def passthrough_models() -> tuple[int, dict]:
     backend = _active_text_backend_full()
     if not backend:
         raise BackendUnavailable("no active text backend")
-    base = backend["base_url"].rstrip("/")
-    async with httpx.AsyncClient(timeout=_timeout("passthrough")) as client:
-        r = await client.get(f"{base}/models", headers=_headers(backend))
-        try:
-            body = r.json()
-        except Exception:
-            body = {"data": [{"id": backend["model"], "object": "model"}]}
-    return r.status_code, body
+    if nim_mode():
+        # Only the pinned model is usable through this proxy — don't proxy the
+        # whole NIM catalog (and don't spend a round-trip on it).
+        return 200, {"object": "list", "data": [
+            {"id": backend["model"], "object": "model", "owned_by": "nvidia"}]}
+    base = check_backend_url(backend["base_url"])
+    status, body = await _http_get_json(f"{base}/models", _headers(backend), _timeout("passthrough"))
+    if body is None:
+        body = {"data": [{"id": backend["model"], "object": "model"}]}
+    return status, body
 
 
 async def passthrough_chat_completions(payload: dict) -> tuple[int, dict]:
     backend = _active_text_backend_full()
     if not backend:
         raise BackendUnavailable("no active text backend")
-    base = backend["base_url"].rstrip("/")
-    body = dict(payload)
+    base = check_backend_url(backend["base_url"])
+    # Forward ONLY whitelisted keys (H2): no n/best_of/logprobs/tools/model etc.
+    body = {k: payload[k] for k in PASSTHROUGH_KEYS if k in payload}
     body["model"] = backend["model"]  # pin active text backend's model
+    body["n"] = 1
     mt = body.get("max_tokens")
     try:
         mt = int(mt) if mt is not None else LLM_MAX_TOKENS_CAP
     except (TypeError, ValueError):
         mt = LLM_MAX_TOKENS_CAP
     body["max_tokens"] = max(1, min(mt, LLM_MAX_TOKENS_CAP))
-    async with httpx.AsyncClient(timeout=_timeout("passthrough")) as client:
-        r = await client.post(f"{base}/chat/completions", json=body, headers=_headers(backend))
-        try:
-            data = r.json()
-        except Exception:
-            raise BackendUnavailable("backend returned non-JSON response")
-    return r.status_code, data
+    status, data = await _http_post_json(f"{base}/chat/completions", body, _headers(backend),
+                                         _timeout("passthrough", _cfg().llm_budget))
+    if data is None:
+        raise BackendUnavailable("backend returned non-JSON response")
+    if status >= 500:
+        raise BackendUnavailable(f"upstream HTTP {status}")
+    return status, data
 
 
 # ---------------------------------------------------------------------------
 # Health + admin test
 # ---------------------------------------------------------------------------
+_health_cache: dict = {"at": 0.0, "value": (False, None)}
+
+
 async def check_health() -> tuple[bool, str | None]:
-    """(connected, model) — best-effort ping of the active text backend."""
+    """(connected, model) — best-effort ping of the active text backend.
+
+    NIM mode caches the result for 60 s per instance so a public /health can't be
+    used to hammer the provider."""
     backend = _active_text_backend_full()
     if not backend:
         return False, None
-    base = backend["base_url"].rstrip("/")
+    if nim_mode() and time.monotonic() - _health_cache["at"] < 60 \
+            and _health_cache["value"][1] == backend["model"]:
+        return _health_cache["value"]
+    result: tuple[bool, str | None] = (False, backend["model"])
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(4.0, connect=3.0)) as client:
-            r = await client.get(f"{base}/models", headers=_headers(backend))
-            if r.status_code == 200:
-                return True, backend["model"]
+        base = check_backend_url(backend["base_url"])
+        status, _ = await _http_get_json(f"{base}/models", _headers(backend),
+                                         httpx.Timeout(4.0, connect=3.0))
+        if status == 200:
+            result = (True, backend["model"])
     except Exception:
         pass
-    return False, backend["model"]
+    if nim_mode():
+        _health_cache.update(at=time.monotonic(), value=result)
+    return result
+
+
+async def _ping(backend: dict) -> dict:
+    result: dict = {"ok": False, "models": [], "ping": None, "error": None}
+    try:
+        base = check_backend_url(backend["base_url"])
+        if not nim_mode():
+            ms, mdata = await _http_get_json(f"{base}/models", _headers(backend),
+                                             httpx.Timeout(10.0, connect=3.0))
+            if ms == 200 and isinstance(mdata, dict):
+                result["models"] = [m.get("id") for m in mdata.get("data", []) if m.get("id")]
+        ps, pdata = await _http_post_json(
+            f"{base}/chat/completions",
+            {"model": backend["model"], "messages": [{"role": "user", "content": "ping"}],
+             "max_tokens": 1, "temperature": 0.0},
+            _headers(backend), httpx.Timeout(20.0, connect=3.0),
+        )
+        if ps >= 400:
+            detail = ""
+            if isinstance(pdata, dict):
+                detail = str(pdata.get("detail") or pdata.get("error") or pdata.get("title") or "")[:160]
+            raise BackendUnavailable(f"HTTP {ps} {detail}".strip())
+        result["ping"] = "ok"
+        result["ok"] = True
+        if nim_mode():
+            result["models"] = [backend["model"]]
+    except Exception as e:  # noqa: BLE001
+        result["error"] = scrub(str(e))[:300]
+    return result
 
 
 async def test_backend(bid: int) -> dict:
-    """Ping a backend: list models + a 1-token completion. Returns a result dict."""
+    """Ping a registry backend: list models + a 1-token completion."""
     backend = _get_backend_full(bid)
     if not backend:
         return {"ok": False, "error": "backend not found"}
-    base = backend["base_url"].rstrip("/")
-    result: dict = {"ok": False, "models": [], "ping": None, "error": None}
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0)) as client:
-            mr = await client.get(f"{base}/models", headers=_headers(backend))
-            if mr.status_code == 200:
-                try:
-                    data = mr.json()
-                    result["models"] = [m.get("id") for m in data.get("data", []) if m.get("id")]
-                except Exception:
-                    result["models"] = []
-            # 1-token ping.
-            pr = await client.post(
-                f"{base}/chat/completions",
-                json={"model": backend["model"],
-                      "messages": [{"role": "user", "content": "ping"}],
-                      "max_tokens": 1, "temperature": 0.0},
-                headers=_headers(backend),
-            )
-            pr.raise_for_status()
-            result["ping"] = "ok"
-            result["ok"] = True
-    except Exception as e:  # noqa: BLE001
-        result["error"] = str(e)[:300]
-    return result
+    return await _ping(backend)
+
+
+async def test_nim_slot(task: str) -> dict:
+    """1-token ping of a NIM slot's primary model (spends ~1 token of credit)."""
+    if task not in TASKS:
+        return {"ok": False, "error": "unknown task"}
+    if not _cfg().nvidia_api_key:
+        return {"ok": False, "error": "NVIDIA_API_KEY is not set"}
+    s = slot_config(task)
+    out = await _ping(_nim_backend(s["model"]))
+    out["model"] = s["model"]
+    return out

@@ -3,7 +3,7 @@ node_modules/
 app/dist/
 app/dev-dist/
 *.tsbuildinfo
-
+.claude/
 # python
 server/.venv/
 __pycache__/

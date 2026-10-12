@@ -457,6 +457,18 @@ def recent_dishes(user_id: int, limit: int = 20) -> list[dict]:
 # ---------------------------------------------------------------------------
 # CSV export
 # ---------------------------------------------------------------------------
+_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def csv_safe(value):
+    """Neutralize spreadsheet formula injection (CSV injection): a text cell that
+    starts with = + - @ TAB or CR gets a leading single quote so Excel/Sheets/
+    LibreOffice show it as text instead of evaluating it. Numbers pass through."""
+    if isinstance(value, str) and value.startswith(_FORMULA_LEADS):
+        return "'" + value
+    return value
+
+
 def export_csv(user_id: int) -> str:
     """All of the user's meals, workouts, weights and water as one CSV.
 
@@ -464,7 +476,14 @@ def export_csv(user_id: int) -> str:
     carry every table. csv.writer handles quoting/escaping of commas, quotes and
     newlines in free-text fields (dish names, workout notes)."""
     buf = io.StringIO()
-    w = csv.writer(buf)
+    _w = csv.writer(buf)
+
+    class _SafeWriter:
+        @staticmethod
+        def writerow(row):
+            _w.writerow([csv_safe(v) for v in row])
+
+    w = _SafeWriter()
     w.writerow([
         "type", "id", "date_or_time", "name_or_dish", "calories", "protein_g",
         "carbs_g", "fat_g", "fiber_g", "sugar_g", "sodium_mg",
@@ -507,3 +526,33 @@ def export_csv(user_id: int) -> str:
                 "", "", "", "", r["water_ml"], "",
             ])
     return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Per-user per-day cache of LLM-generated text (insights summary, phrased
+# suggestions): a repeat view the same day never spends credits again (H2).
+# ---------------------------------------------------------------------------
+def cache_get(user_id: int, key: str, day: str) -> str | None:
+    with db.cursor() as cur:
+        row = cur.execute(
+            "SELECT value FROM llm_cache WHERE user_id=? AND key=? AND day=?",
+            (user_id, key, day),
+        ).fetchone()
+    return row["value"] if row else None
+
+
+def cache_put(user_id: int, key: str, day: str, value: str) -> None:
+    with db.cursor() as cur:
+        cur.execute(
+            "INSERT INTO llm_cache (user_id, key, day, value) VALUES (?,?,?,?) "
+            "ON CONFLICT(user_id, key) DO UPDATE SET day=excluded.day, value=excluded.value",
+            (user_id, key, day, value),
+        )
+
+
+def cache_invalidate(user_id: int, prefix: str) -> None:
+    with db.cursor() as cur:
+        cur.execute(
+            "DELETE FROM llm_cache WHERE user_id=? AND substr(key,1,?)=?",
+            (user_id, len(prefix), prefix),
+        )

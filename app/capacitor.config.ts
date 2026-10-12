@@ -8,8 +8,9 @@ const config: CapacitorConfig = {
   webDir: 'dist',
   server: {
     // https scheme gives the WebView a secure context, which getUserMedia
-    // (camera) requires. The app talks to Sekisho over the stored tunnel URL,
-    // never same-origin, so this scheme does not affect API calls.
+    // (camera) requires. The app talks to Sekisho over the https:// Vercel
+    // address stored at pairing, never same-origin, so this scheme does not
+    // affect API calls (the server's CORS allows https://localhost).
     androidScheme: 'https',
   },
 };

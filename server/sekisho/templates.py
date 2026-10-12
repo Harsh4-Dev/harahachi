@@ -635,11 +635,20 @@ LOGIN_HTML = f"""<!doctype html><html lang="en"><head>{HEAD}<title>Sekisho · �
     <div class="romaji" style="letter-spacing:3px;color:var(--sumi-soft);font-size:12px;margin-top:4px;">SEKISHO GATEWAY</div>
     <input type="password" name="password" placeholder="Admin password" autofocus required>
     <div class="err"><!--ERR--></div>
-    <button class="btn btn-shu" style="width:100%;" type="submit">Enter the checkpoint</button>
-    <p class="muted" style="margin-top:16px;">Password is from <code>SEKISHO_ADMIN_PASSWORD</code> or printed in the server log.</p>
+    <button class="btn btn-shu" style="width:100%;" type="submit"<!--DISABLED-->>Enter the checkpoint</button>
+    <p class="muted" style="margin-top:16px;">Password is from <code>SEKISHO_ADMIN_PASSWORD</code><!--PWHINT-->.</p>
   </form>
 </div>
 </body></html>"""
+
+
+def login_html(message: str = "", disabled: bool = False, on_vercel: bool = False) -> str:
+    """Login page. ``message`` is server-controlled text (escaped anyway)."""
+    import html as _html
+    page = LOGIN_HTML.replace("<!--ERR-->", _html.escape(message))
+    page = page.replace("<!--DISABLED-->", " disabled" if disabled else "")
+    page = page.replace("<!--PWHINT-->", "" if on_vercel else " or printed in the server log")
+    return page
 
 
 # ---------------------------------------------------------------------------
@@ -647,7 +656,7 @@ LOGIN_HTML = f"""<!doctype html><html lang="en"><head>{HEAD}<title>Sekisho · �
 # ---------------------------------------------------------------------------
 
 
-_DASHBOARD_BODY = r"""<!doctype html><html lang="en"><head>__HEAD__<title>Sekisho Admin · 関所</title></head>
+_DASHBOARD_BODY = r"""<!doctype html><html lang="en"><head>__HEAD__<meta name="csrf-token" content="__CSRF__"><title>Sekisho Admin · 関所</title></head>
 <body>
 __SCENES__<div class="vignette"></div>
 __PETALS__
@@ -660,6 +669,7 @@ __PETALS__
       <div class="romaji">edge-ai gateway · admin</div></div>
     </div>
     <form method="post" action="/admin/logout" style="margin:0;">
+      <input type="hidden" name="csrf_token" value="__CSRF__">
       <button class="btn btn-ghost btn-sm" type="submit">Log out</button>
     </form>
   </div>
@@ -709,8 +719,8 @@ __PETALS__
     <div class="glass card">
       <h2><span class="seal">人</span>Users</h2>
       <table><thead><tr>
-        <th>User</th><th>Goal</th><th>Meals</th><th>Workouts</th><th>Last activity</th><th></th>
-      </tr></thead><tbody id="users-tb"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody></table>
+        <th>User</th><th>Goal</th><th>Meals</th><th>Workouts</th><th>Last activity</th><th>Failed PINs</th><th></th>
+      </tr></thead><tbody id="users-tb"><tr><td colspan="7" class="muted">Loading…</td></tr></tbody></table>
       <div class="drill" id="user-drill" style="display:none;"></div>
     </div>
   </div>
@@ -739,6 +749,14 @@ __PETALS__
   <!-- ============ BACKENDS ============ -->
   <div class="page" id="page-backends">
     <div class="grid">
+      <div class="glass card" style="grid-column:1 / -1;">
+        <h2><span class="seal">算</span>NVIDIA NIM model slots</h2>
+        <div id="nim-status" class="muted">Loading…</div>
+        <table style="margin-top:10px;"><thead><tr><th>Task</th><th>Model</th><th>Fallback (tried once)</th><th></th></tr></thead>
+          <tbody id="nim-slots"></tbody></table>
+        <p class="muted" style="margin-top:10px;">Empty model/fallback = use the env/default value. Fallback <code>none</code> disables it.
+          The API key is read from <code>NVIDIA_API_KEY</code> only — it is never stored or shown here.</p>
+      </div>
       <div class="glass card" style="grid-column:1 / -1;">
         <h2><span class="seal">脳</span>LLM backends</h2>
         <div id="backends-list"><span class="muted">Loading…</span></div>
@@ -806,8 +824,9 @@ __PETALS__
   </div>
 </div>
 
-<script>
+<script nonce="__NONCE__">
 const root=document.documentElement;
+const CSRF=(document.querySelector('meta[name="csrf-token"]')||{}).content||'';
 function esc(s){return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function ago(iso){if(!iso) return 'never';const d=new Date(iso),s=(Date.now()-d.getTime())/1000;
   if(s<60) return Math.floor(s)+'s ago';if(s<3600) return Math.floor(s/60)+'m ago';
@@ -815,7 +834,11 @@ function ago(iso){if(!iso) return 'never';const d=new Date(iso),s=(Date.now()-d.
 function statusClass(st){return st>=500?'status-5xx':st>=400?'status-4xx':'status-2xx';}
 function toast(msg,ok){const t=document.getElementById('toast');t.textContent=msg;
   t.className='toast show '+(ok?'ok':'bad');setTimeout(()=>{t.className='toast';},2600);}
-async function api(url,opts){const r=await fetch(url,opts);let j=null;try{j=await r.json();}catch(e){}
+async function api(url,opts){opts=Object.assign({credentials:'same-origin'},opts||{});
+  const m=(opts.method||'GET').toUpperCase();
+  if(m!=='GET'&&m!=='HEAD'){opts.headers=Object.assign({},opts.headers||{},{'X-CSRF-Token':CSRF});}
+  const r=await fetch(url,opts);let j=null;try{j=await r.json();}catch(e){}
+  if(r.status===401&&j&&j.error&&j.error.code==='unauthorized'){location.href='/admin';}
   return {ok:r.ok,status:r.status,body:j};}
 function form(obj){const fd=new FormData();for(const k in obj)fd.append(k,obj[k]);return fd;}
 
@@ -874,15 +897,20 @@ async function refreshState(){
   const dt=document.getElementById('devices-tb');
   if(!s.devices.length){dt.innerHTML='<tr><td colspan="6" class="muted">No devices paired yet.</td></tr>';}
   else{dt.innerHTML=s.devices.map(d=>{
-    const rev=d.revoked?' <span class="tag off">revoked</span>':'';
-    const btn=d.revoked?'':'<button class="btn btn-ghost btn-sm revoke" data-id="'+esc(d.device_id)+'">Revoke</button>';
+    const rev=(d.revoked?' <span class="tag off">revoked</span>':'')+
+      (d.pin_locked?' <span class="tag off">PIN-locked</span>':'');
+    const btn=(d.pin_locked?'<button class="btn btn-ghost btn-sm dev-unlock" data-id="'+esc(d.device_id)+'">Unlock</button> ':'')+
+      (d.revoked?'':'<button class="btn btn-ghost btn-sm revoke" data-id="'+esc(d.device_id)+'">Revoke</button>');
     const usr=d.active_username?esc(d.active_username):'<span class="muted">—</span>';
     return '<tr><td>'+esc(d.name)+rev+'</td><td><code>'+esc(d.device_id)+'</code></td><td>'+usr+
       '</td><td>'+ago(d.last_seen)+'</td><td class="stat">'+d.req_count+
       '</td><td style="text-align:right;">'+btn+'</td></tr>';}).join('');
     dt.querySelectorAll('.revoke').forEach(x=>x.addEventListener('click',async()=>{
       await api('/admin/api/revoke',{method:'POST',body:form({device_id:x.dataset.id})});
-      toast('Device revoked',true);refreshState();}));}
+      toast('Device revoked',true);refreshState();}));
+    dt.querySelectorAll('.dev-unlock').forEach(x=>x.addEventListener('click',async()=>{
+      const r=await api('/admin/api/devices/unlock',{method:'POST',body:form({device_id:x.dataset.id})});
+      toast(r.ok?'Device unlocked':'Unlock failed',r.ok);refreshState();}));}
   window._logs=s.logs; renderLogs();
   const ip=s.ips,lines=[];
   if(ip.tailscale.length) lines.push('Tailscale: '+ip.tailscale.map(x=>x+':'+s.port).join('  ·  '));
@@ -914,12 +942,18 @@ async function loadUsers(){
   const {ok,body}=await api('/admin/api/users'); if(!ok) return;
   document.getElementById('tab-users-n').textContent=body.users.length;
   const tb=document.getElementById('users-tb');
-  if(!body.users.length){tb.innerHTML='<tr><td colspan="6" class="muted">No users yet.</td></tr>';return;}
-  tb.innerHTML=body.users.map(u=>'<tr><td><span class="linkish user-link" data-id="'+u.id+'">'+esc(u.username)+
+  if(!body.users.length){tb.innerHTML='<tr><td colspan="7" class="muted">No users yet.</td></tr>';return;}
+  tb.innerHTML=body.users.map(u=>{
+    const lk=u.locked==='hard'?' <span class="tag off">locked</span>':u.locked==='temp'?' <span class="tag off">cooling down</span>':'';
+    const unl=(u.locked||u.failed_logins)?'<button class="btn btn-ghost btn-sm user-unlock" data-id="'+u.id+'">Unlock</button> ':'';
+    return '<tr><td><span class="linkish user-link" data-id="'+u.id+'">'+esc(u.username)+
     '</span></td><td>'+esc(u.goal||'—')+'</td><td class="stat">'+u.meal_count+'</td><td class="stat">'+
-    u.workout_count+'</td><td>'+ago(u.last_meal)+'</td>'+
-    '<td style="text-align:right;"><button class="btn btn-ghost btn-sm user-link" data-id="'+u.id+'">View</button></td></tr>').join('');
+    u.workout_count+'</td><td>'+ago(u.last_meal)+'</td><td class="stat">'+(u.failed_logins||0)+lk+'</td>'+
+    '<td style="text-align:right;">'+unl+'<button class="btn btn-ghost btn-sm user-link" data-id="'+u.id+'">View</button></td></tr>';}).join('');
   tb.querySelectorAll('.user-link').forEach(x=>x.addEventListener('click',()=>drillUser(x.dataset.id)));
+  tb.querySelectorAll('.user-unlock').forEach(x=>x.addEventListener('click',async()=>{
+    const r=await api('/admin/api/users/'+x.dataset.id+'/unlock',{method:'POST'});
+    toast(r.ok?'Sign-in unlocked':'Unlock failed',r.ok);loadUsers();}));
 }
 // Adherence mini-chart: 8 weekly bars, height ∝ adherence %, coloured by band.
 function adherenceSvg(weeks){
@@ -1034,7 +1068,31 @@ document.getElementById('bk-create').addEventListener('click',async()=>{
   if(ok){toast('Backend added',true);['bk-name','bk-model','bk-url','bk-key'].forEach(i=>document.getElementById(i).value='');
     loadBackends();}else{toast((body&&body.error&&body.error.message)||'Failed',false);}
 });
+async function loadNim(){
+  const {ok,body}=await api('/admin/api/nim'); if(!ok) return;
+  const st=document.getElementById('nim-status');
+  st.innerHTML='Provider: <b>'+esc(body.provider)+'</b> · '+esc(body.base_url)+' · key: '+
+    (body.key_configured?('set ('+esc(body.key_hint)+')'):'<span style="color:var(--shu)">NVIDIA_API_KEY not set</span>')+
+    ' · inline image limit: '+esc(body.max_image_b64)+' base64 chars';
+  const tb=document.getElementById('nim-slots');
+  tb.innerHTML=Object.values(body.slots).map(sl=>'<tr><td><b>'+esc(sl.task)+'</b><br><span class="muted">'+esc(sl.source)+'</span></td>'+
+    '<td><input class="inp" id="nim-m-'+esc(sl.task)+'" value="'+esc(sl.source==='admin'?sl.model:'')+'" placeholder="'+esc(sl.model)+'"></td>'+
+    '<td><input class="inp" id="nim-f-'+esc(sl.task)+'" value="" placeholder="'+esc(sl.fallback||'none')+'"></td>'+
+    '<td style="text-align:right;white-space:nowrap;"><button class="btn btn-ghost btn-sm nim-save" data-task="'+esc(sl.task)+'">Save</button> '+
+    '<button class="btn btn-ghost btn-sm nim-test" data-task="'+esc(sl.task)+'">Test</button>'+
+    '<div class="muted" id="nim-t-'+esc(sl.task)+'"></div></td></tr>').join('');
+  tb.querySelectorAll('.nim-save').forEach(x=>x.addEventListener('click',async()=>{
+    const t=x.dataset.task;
+    const r=await api('/admin/api/nim/slot',{method:'POST',body:form({task:t,
+      model:document.getElementById('nim-m-'+t).value,fallback:document.getElementById('nim-f-'+t).value})});
+    toast(r.ok?'Slot '+t+' saved':((r.body&&r.body.error&&r.body.error.message)||'Failed'),r.ok);loadNim();}));
+  tb.querySelectorAll('.nim-test').forEach(x=>x.addEventListener('click',async()=>{
+    const t=x.dataset.task,out=document.getElementById('nim-t-'+t);out.textContent='Testing…';
+    const r=await api('/admin/api/nim/test',{method:'POST',body:form({task:t})});
+    out.textContent=(r.body&&r.body.ok)?('ok · '+esc(r.body.model)):('FAIL: '+((r.body&&r.body.error)||'unreachable'));}));
+}
 async function loadBackends(){
+  loadNim();
   const {ok,body}=await api('/admin/api/backends'); if(!ok) return;
   document.getElementById('tab-backends-n').textContent=body.backends.length;
   const el=document.getElementById('backends-list');
@@ -1153,10 +1211,15 @@ def _scene_layers() -> str:
     return "".join(layers)
 
 
-def dashboard_html() -> str:
+def dashboard_html(nonce: str = "", csrf: str = "") -> str:
+    """Dashboard page. ``nonce`` authorizes the one inline <script> under the
+    admin CSP; ``csrf`` is echoed in a meta tag + the logout form and sent back
+    as X-CSRF-Token on every state-changing fetch."""
     return (
         _DASHBOARD_BODY
         .replace("__HEAD__", HEAD)
         .replace("__SCENES__", _scene_layers())
         .replace("__PETALS__", _petals_html())
+        .replace("__NONCE__", nonce)
+        .replace("__CSRF__", csrf)
     )

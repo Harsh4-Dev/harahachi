@@ -1,8 +1,15 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-pydantic==2.10.4
+# Sekisho server dependencies (Docker image + local dev).
+# The Vercel function installs the repo-root requirements.txt, which must list
+# the same pins (minus uvicorn); tests_smoke.py checks the two stay in sync.
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.0
 httpx==0.28.1
-qrcode[pil]==8.0
-python-multipart==0.0.20
-pywebpush==2.3.0
-cryptography>=42.0
+qrcode[pil]==8.2
+pillow==12.3.0
+python-multipart==0.0.32
+pywebpush==2.5.0
+cryptography==50.0.0
+# Postgres (used only when DATABASE_URL is set; SQLite otherwise)
+psycopg[binary]==3.3.6
+psycopg-pool==3.3.3

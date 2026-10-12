@@ -6,6 +6,11 @@
 // a product card. Both confirm with the vermillion hanko stamp.
 //
 // The file input remains as the gallery button AND the no-permission fallback.
+//
+// v4 (Vercel + NVIDIA NIM): the frozen frame keeps its FULL-RES blob/URL for the
+// on-screen preview (the overlay maps normalized points onto it), while the
+// upload is a separate downscaled JPEG from lib/imagePrep (≤1024px, ≤170 KB).
+// Errors map through api/errors → 413 / daily cap / 503 / network popups.
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useCamera, type Frame } from './useCamera';
@@ -15,6 +20,8 @@ import { BarcodeCard } from './BarcodeCard';
 import { PetalLoader } from '../components/PetalLoader';
 import { useApp } from '../state/AppContext';
 import { ApiError } from '../api/http';
+import { AI_COPY, classifyApiError } from '../api/errors';
+import { prepareImageForUpload, type PrepOptions } from '../lib/imagePrep';
 import type { AnalyzeResult, BarcodeResult, MealInput } from '../api/types';
 
 type CaptureMode = 'dish' | 'barcode';
@@ -49,8 +56,10 @@ export function Capture({ onClose, onLogged, reducedMotion }: Props) {
   }, []);
 
   // --- Dish: run analysis on a frozen frame (from shutter or gallery) ---
+  // `f` is the full-res frame (preview + overlay mapping); only the upload is
+  // downscaled. `prep` tightens the budget on a retry after a 413.
   const runAnalyze = useCallback(
-    async (f: Frame) => {
+    async (f: Frame, prep?: PrepOptions) => {
       setFrame((prev) => {
         revokeFrame(prev);
         return f;
@@ -58,18 +67,36 @@ export function Capture({ onClose, onLogged, reducedMotion }: Props) {
       setResult(null);
       setAnalyzing(true);
       try {
-        const r = await client.analyzeMeal(f.blob);
+        let upload: Blob;
+        try {
+          upload = (await prepareImageForUpload(f.blob, prep)).blob;
+        } catch {
+          // Undecodable here (rare codec) — send the original; the server
+          // re-encodes or answers 413, which lands in the popup below.
+          upload = f.blob;
+        }
+        const r = await client.analyzeMeal(upload);
         setResult(r);
       } catch (e) {
-        const net = e instanceof ApiError && e.status === 0;
         revokeFrame(f);
         setFrame(null);
+        const kind = classifyApiError(e);
+        // The app is already routing to "pair again" / login — no popup.
+        if (kind === 'device_revoked' || kind === 'no_user') return;
+        const again = (p?: PrepOptions) => () => void runAnalyze({ ...f, url: URL.createObjectURL(f.blob) }, p);
         // Shared error surface: retry the analysis, or fall back to manual entry.
+        if (kind === 'daily_cap') {
+          // Retrying won't help today — manual entry is the way forward.
+          showError({ message: AI_COPY.daily_cap, secondaryLabel: 'Log manually', onSecondary: onClose });
+          return;
+        }
         showError({
-          message: net
-            ? 'Sekisho is unreachable — check the server or your connection.'
-            : 'Could not read the dish.',
-          retry: () => void runAnalyze({ ...f, url: URL.createObjectURL(f.blob) }),
+          message:
+            kind === 'too_large' || kind === 'network' || kind === 'rate_limited' || kind === 'unavailable'
+              ? AI_COPY[kind]
+              : 'Could not read the dish.',
+          // After a 413, retry with a much smaller upload.
+          retry: kind === 'too_large' ? again({ maxEdge: 768, maxBytes: 100 * 1024 }) : again(prep),
           secondaryLabel: 'Enter manually',
           onSecondary: onClose, // hands back to Chaya where manual entry lives
         });
@@ -132,11 +159,11 @@ export function Capture({ onClose, onLogged, reducedMotion }: Props) {
         const net = e instanceof ApiError && e.status === 0;
         lookingUpRef.current = false;
         setLookingUp(false);
+        const kind = classifyApiError(e);
+        if (kind === 'device_revoked' || kind === 'no_user') return;
         // Barcode lookup failure → retry (re-scan) or manual entry.
         showError({
-          message: net
-            ? 'Sekisho is unreachable — check the server or your connection.'
-            : 'Barcode lookup failed.',
+          message: net ? AI_COPY.network : 'Barcode lookup failed.',
           retry: () => {
             lookingUpRef.current = false;
             setLookingUp(false);
@@ -204,7 +231,7 @@ export function Capture({ onClose, onLogged, reducedMotion }: Props) {
           style={{ visibility: noCamera ? 'hidden' : 'visible' }}
         />
       )}
-      {noCamera && <div className="capture-feed capture-feed-fallback" aria-hidden />}
+      {noCamera && !frame && <div className="capture-feed capture-feed-fallback" aria-hidden />}
 
       {/* Top glass ribbon */}
       <div className="capture-ribbon glass-ink">

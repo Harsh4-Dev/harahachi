@@ -1,14 +1,43 @@
 """Pydantic request/response models matching the API contract in API.md."""
 from __future__ import annotations
 
+import re
+from datetime import date as _date, datetime as _datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+# ---- shared bounds (M4) ----
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+DISH_MAX = 120
+CHAT_MAX_MESSAGES = 20
+CHAT_MAX_TOTAL_CHARS = 8000
+MEAL_KCAL_MAX = 5000
+WORKOUT_MINUTES_MAX = 600
+
+
+def valid_date(v: str | None) -> bool:
+    """True for a real calendar date in strict YYYY-MM-DD form."""
+    if not isinstance(v, str) or not DATE_RE.fullmatch(v):
+        return False
+    try:
+        _date.fromisoformat(v)
+    except ValueError:
+        return False
+    return True
+
+
+def _check_date(v: str | None) -> str | None:
+    if v is None:
+        return v
+    if not valid_date(v):
+        raise ValueError("date must be YYYY-MM-DD")
+    return v
 
 
 # ---- Pairing ----
 class PairClaimIn(BaseModel):
-    token: str
+    token: str = Field(min_length=1, max_length=64)
     device_name: str = Field(default="phone", min_length=1, max_length=64)
 
 
@@ -24,8 +53,8 @@ class Point(BaseModel):
 
 
 class AnalysisItem(BaseModel):
-    name: str
-    calories: int = Field(ge=0, le=6000)
+    name: str = Field(max_length=200)
+    calories: int = Field(ge=0, le=MEAL_KCAL_MAX)
     # Per-item macros are REQUIRED by the contract (API.md: one entry per plate
     # component, its own macros, top-level = sum). Default to 0 so lenient LLM
     # output still validates, but the mock always fills real numbers.
@@ -58,8 +87,8 @@ class AnalysisItem(BaseModel):
 
 
 class Analysis(BaseModel):
-    dish: str
-    calories: int = Field(ge=0, le=6000)
+    dish: str = Field(max_length=200)
+    calories: int = Field(ge=0, le=MEAL_KCAL_MAX)
     protein_g: int = Field(ge=0, le=500)
     carbs_g: int = Field(ge=0, le=800)
     fat_g: int = Field(ge=0, le=400)
@@ -68,8 +97,8 @@ class Analysis(BaseModel):
     sugar_g: Optional[int] = Field(default=None, ge=0, le=800)
     sodium_mg: Optional[int] = Field(default=None, ge=0, le=50000)
     confidence: float = Field(ge=0.0, le=1.0)
-    question: Optional[str] = None
-    items: list[AnalysisItem] = Field(default_factory=list)
+    question: Optional[str] = Field(default=None, max_length=500)
+    items: list[AnalysisItem] = Field(default_factory=list, max_length=30)
 
     @field_validator("question", mode="after")
     @classmethod
@@ -82,8 +111,8 @@ class Analysis(BaseModel):
 
 # ---- Meals ----
 class MealIn(BaseModel):
-    dish: str = Field(min_length=1, max_length=200)
-    calories: int = Field(ge=0, le=10000)
+    dish: str = Field(min_length=1, max_length=DISH_MAX)
+    calories: int = Field(ge=0, le=MEAL_KCAL_MAX)
     protein_g: int = Field(ge=0, le=1000)
     carbs_g: int = Field(ge=0, le=1000)
     fat_g: int = Field(ge=0, le=1000)
@@ -91,8 +120,22 @@ class MealIn(BaseModel):
     fiber_g: Optional[int] = Field(default=None, ge=0, le=500)
     sugar_g: Optional[int] = Field(default=None, ge=0, le=1000)
     sodium_mg: Optional[int] = Field(default=None, ge=0, le=100000)
-    eaten_at: Optional[str] = None
+    # ISO-8601 datetime (e.g. 2026-05-01T12:00:00 or ...Z), bounded.
+    eaten_at: Optional[str] = Field(default=None, max_length=40)
     source: Literal["photo", "manual", "suggestion"] = "manual"
+
+    @field_validator("eaten_at")
+    @classmethod
+    def _iso_datetime(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        if not DATE_RE.fullmatch(v[:10]):
+            raise ValueError("eaten_at must be an ISO-8601 datetime")
+        try:
+            _datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError("eaten_at must be an ISO-8601 datetime")
+        return v
 
 
 class Meal(BaseModel):
@@ -167,7 +210,12 @@ class ProfileOut(ProfileIn):
 # =========================================================================
 class WeightIn(BaseModel):
     weight_kg: float = Field(ge=20.0, le=400.0)
-    date: Optional[str] = None
+    date: Optional[str] = Field(default=None, max_length=10)
+
+    @field_validator("date")
+    @classmethod
+    def _date_ok(cls, v: str | None) -> str | None:
+        return _check_date(v)
 
 
 class WeightEntry(BaseModel):
@@ -198,8 +246,8 @@ class WaterOut(BaseModel):
 # ---- Workouts ----
 class WorkoutIn(BaseModel):
     kind: str = Field(min_length=1, max_length=80)
-    minutes: int = Field(ge=0, le=1440)
-    calories_burned: int = Field(ge=0, le=10000)
+    minutes: int = Field(ge=0, le=WORKOUT_MINUTES_MAX)
+    calories_burned: int = Field(ge=0, le=MEAL_KCAL_MAX)
     note: Optional[str] = Field(default=None, max_length=280)
 
 
@@ -242,12 +290,20 @@ class CalendarOut(BaseModel):
 
 # ---- Chat ----
 class ChatMessage(BaseModel):
-    role: str
-    content: str
+    # Only the conversation roles: a client-supplied "system" message could
+    # override Annai's server-side system prompt (prompt injection).
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=CHAT_MAX_TOTAL_CHARS)
 
 
 class ChatIn(BaseModel):
-    messages: list[ChatMessage]
+    messages: list[ChatMessage] = Field(min_length=1, max_length=CHAT_MAX_MESSAGES)
+
+    @model_validator(mode="after")
+    def _bounded(self):
+        if sum(len(m.content) for m in self.messages) > CHAT_MAX_TOTAL_CHARS:
+            raise ValueError(f"messages exceed {CHAT_MAX_TOTAL_CHARS} characters in total")
+        return self
 
 
 class ChatOut(BaseModel):
@@ -285,9 +341,12 @@ class BarcodeOut(BaseModel):
 # =========================================================================
 # v2: Accounts
 # =========================================================================
+PIN_RE = re.compile(r"^[0-9]{6,8}$")
+
+
 class RegisterIn(BaseModel):
     username: str = Field(min_length=3, max_length=32)
-    pin: str = Field(min_length=4, max_length=8)
+    pin: str = Field(min_length=6, max_length=8)
     profile: Optional[ProfileIn] = None
 
     @field_validator("username")
@@ -301,14 +360,21 @@ class RegisterIn(BaseModel):
     @field_validator("pin")
     @classmethod
     def _pin_digits(cls, v: str) -> str:
-        if not v.isdigit():
-            raise ValueError("pin must be 4-8 digits")
+        if not PIN_RE.fullmatch(v):
+            raise ValueError("pin must be 6-8 digits")
         return v
 
 
 class LoginIn(BaseModel):
     username: str = Field(min_length=1, max_length=32)
-    pin: str = Field(min_length=1, max_length=8)
+    pin: str = Field(min_length=6, max_length=8)
+
+    @field_validator("pin")
+    @classmethod
+    def _pin_digits(cls, v: str) -> str:
+        if not PIN_RE.fullmatch(v):
+            raise ValueError("pin must be 6-8 digits")
+        return v
 
 
 class UserOut(BaseModel):
@@ -393,5 +459,6 @@ class ChatV2Out(BaseModel):
 # v2: Push subscriptions
 # =========================================================================
 class PushSubscribeIn(BaseModel):
+    # Shape/host/size are validated by push.validate_subscription (M1).
     subscription: dict
     tz_offset_min: int = Field(default=0, ge=-900, le=900)

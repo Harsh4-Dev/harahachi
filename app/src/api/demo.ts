@@ -40,6 +40,7 @@ import type {
 } from './types';
 import { computeTargets, computeEtaDate } from '../lib/targets';
 import { parseAteMessage } from '../lib/foodParser';
+import { apiErrorFrom } from './http';
 
 // The demo's fake account. Real accounts live server-side; demo mode gets one
 // canned traveler so the account UI (username, logout, switch) is exercisable.
@@ -331,6 +332,26 @@ function delay<T>(value: T, ms = 320): Promise<T> {
   return new Promise((res) => setTimeout(() => res(value), ms));
 }
 
+// DEV-only fault injection for the AI endpoints, so every v4 error path can be
+// exercised in demo mode: localStorage hh.demoFault = 413 | 429 | 503 | 401.
+// Goes through apiErrorFrom → identical routing to the real HTTP client
+// (401 fires the global "pair again" hook). Dead-code-eliminated in builds.
+const DEMO_FAULTS: Record<string, { status: number; code: string; message: string }> = {
+  '413': { status: 413, code: 'image_too_large', message: 'Image exceeds the upload limit' },
+  '429': { status: 429, code: 'daily_cap', message: 'Daily AI limit reached for this user' },
+  '503': { status: 503, code: 'provider_unavailable', message: 'Vision model unreachable' },
+  '401': { status: 401, code: 'invalid_key', message: 'Unknown or revoked device key' },
+};
+async function maybeDemoFault(image?: Blob): Promise<void> {
+  if (!import.meta.env.DEV) return;
+  const w = window as unknown as { __hhLastUploadBytes?: number };
+  if (image) w.__hhLastUploadBytes = image.size;
+  const f = DEMO_FAULTS[localStorage.getItem('hh.demoFault') ?? ''];
+  if (!f) return;
+  await delay(null, 300);
+  throw apiErrorFrom(f.status, { error: { code: f.code, message: f.message } });
+}
+
 // Profile + computed targets + v3 eta_date, mirroring GET /profile.
 function withTargets(p: Profile): ProfileWithTargets {
   return { ...p, targets: computeTargets(p), eta_date: computeEtaDate(p) };
@@ -345,6 +366,7 @@ export function createDemoClient(): HarahachiClient {
     },
 
     async analyzeMeal(image: Blob, hint?: string, portion?: Portion): Promise<AnalyzeResult> {
+      await maybeDemoFault(image);
       const seed = (image.size % 7) + (hint ? hint.length % 3 : 0);
       const base = DISHES[seed % DISHES.length];
       const scale = portion === 'small' ? 0.75 : portion === 'large' ? 1.35 : 1;
@@ -551,6 +573,7 @@ export function createDemoClient(): HarahachiClient {
     // ---- v2: body-photo estimate (deterministic mock) ----
 
     async estimateBodyPhoto(image: Blob): Promise<BodyPhotoEstimate> {
+      await maybeDemoFault(image);
       // Deterministic off the blob size so the same photo returns a stable %.
       const pct = 14 + (image.size % 16); // 14..29
       const lo = Math.max(6, pct - 3);
@@ -569,6 +592,7 @@ export function createDemoClient(): HarahachiClient {
     // ---- v2: assistant chat (canned coach + "I ate X" parser) ----
 
     async chat(messages: ChatMessage[]): Promise<ChatResponse> {
+      await maybeDemoFault();
       const last = [...messages].reverse().find((m) => m.role === 'user');
       const text = last?.content ?? '';
       const lower = text.toLowerCase();

@@ -9,6 +9,10 @@
 //  • A shared error surface: showError(message, retry?) drives a glass popup with
 //    a RETRY button (App renders it). NO spinner may persist past its timeout —
 //    callers that fail surface here instead of hanging.
+//
+// v4 (Vercel): a 401 for an unknown/revoked device key (e.g. after the move to
+// the new deployment) drops the dead pairing + every volatile cache and shows
+// the 'repair' phase — "This phone needs to be paired again" → Pairing.
 
 import {
   createContext,
@@ -22,7 +26,7 @@ import {
 } from 'react';
 import type { HarahachiClient, Meal, MealInput, User } from '../api/types';
 import { createDemoClient } from '../api/demo';
-import { createHttpClient, ApiError, setNoUserHandler } from '../api/http';
+import { createHttpClient, ApiError, setDeviceRevokedHandler, setNoUserHandler } from '../api/http';
 import {
   clearActiveUser,
   clearDraftProfile,
@@ -43,7 +47,8 @@ import {
 } from '../api/storage';
 
 // 'login' = the device is paired (or demo) but there is no active account.
-export type Phase = 'onboarding' | 'pairing' | 'login' | 'ready';
+// 'repair' = the server no longer recognises this device key → pair again.
+export type Phase = 'onboarding' | 'pairing' | 'login' | 'ready' | 'repair';
 
 interface Toast {
   id: number;
@@ -145,6 +150,26 @@ export function AppProvider({
       setPhase((p) => (p === 'onboarding' || p === 'pairing' ? p : 'login'));
     });
     return () => setNoUserHandler(null);
+  }, []);
+
+  // Global unknown/revoked device (401 invalid_key…) → the stored pairing is
+  // dead. Drop it plus the active user and every volatile cache (data
+  // isolation: nothing from this session may survive into the next pairing),
+  // then show the "pair again" screen. Idempotent — parallel 401s are fine.
+  useEffect(() => {
+    setDeviceRevokedHandler(() => {
+      clearPairing();
+      clearActiveUser();
+      clearVolatileCaches();
+      setPairingState(null);
+      setUser(null);
+      setDemo(false);
+      setDemoEnabled(false);
+      setQueueCount(0);
+      setError(null);
+      setPhase((p) => (p === 'onboarding' || p === 'pairing' ? p : 'repair'));
+    });
+    return () => setDeviceRevokedHandler(null);
   }, []);
 
   const flushQueue = useCallback(async () => {
