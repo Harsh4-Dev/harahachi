@@ -57,6 +57,7 @@ DOCKER_BODY_LIMIT = 16 * 1024 * 1024  # matches nginx client_max_body_size 16m
 NIM_INLINE_B64_LIMIT = 180_000
 NIM_DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 CRON_SECRET_MIN_LEN = 32
+OPS_TOKEN_MIN_LEN = 48
 
 
 @dataclass
@@ -91,6 +92,13 @@ class Config:
     session_secret: str = field(default_factory=lambda: os.environ.get("SEKISHO_SESSION_SECRET", ""), repr=False)
     cron_secret: str = field(default_factory=lambda: os.environ.get("CRON_SECRET", ""), repr=False)
     nvidia_api_key: str = field(default_factory=lambda: os.environ.get("NVIDIA_API_KEY", "").strip(), repr=False)
+    # Server-to-server ops API (/api/ops/v1, consumed by the private Bansho
+    # console). Unset or shorter than OPS_TOKEN_MIN_LEN => the whole surface 404s.
+    ops_token: str = field(default_factory=lambda: os.environ.get("SEKISHO_OPS_TOKEN", "").strip(), repr=False)
+
+    # IANA timezone that defines "a day" for analytics (DAU, timeseries,
+    # retention, the ops summary's "today").
+    tz_name: str = field(default_factory=lambda: (os.environ.get("SEKISHO_TZ") or "Asia/Kolkata").strip())
 
     # ---- LLM provider ----
     # "nim" (NVIDIA NIM per-task model slots, key from NVIDIA_API_KEY) or
@@ -191,6 +199,10 @@ class Config:
             return (f"CRON_SECRET must be at least {CRON_SECRET_MIN_LEN} characters on Vercel "
                     "(generate one with: openssl rand -hex 32). Cron ticks are refused until it is.")
         return None
+
+    def ops_enabled(self) -> bool:
+        """The ops API exists only with a long (>= 48 chars) SEKISHO_OPS_TOKEN."""
+        return len(self.ops_token or "") >= OPS_TOKEN_MIN_LEN
 
     def provider_mode(self) -> str:
         if self.provider in ("nim", "registry"):

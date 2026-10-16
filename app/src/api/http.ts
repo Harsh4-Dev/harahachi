@@ -44,6 +44,7 @@ import type {
   WorkoutsResponse,
 } from './types';
 import type { Pairing } from './storage';
+import { isNativeShell } from './storage';
 
 export class ApiError extends Error {
   code: string;
@@ -112,13 +113,33 @@ function apiRoot(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, '') + '/api/v1';
 }
 
+// v6: which client is talking — `apk/<v>` inside the Capacitor shell,
+// `pwa/<v>` when launched as an installed PWA (display-mode standalone), else
+// `web/<v>`. Sent on every request so the server can store client_kind +
+// client_version on the device row (ops analytics). Version = package.json.
+export function clientHeaderValue(): string {
+  const v = typeof __APP_VERSION__ === 'string' && __APP_VERSION__ ? __APP_VERSION__ : '0.0.0';
+  if (isNativeShell()) return `apk/${v}`;
+  let standalone = false;
+  try {
+    standalone =
+      window.matchMedia?.('(display-mode: standalone)').matches === true ||
+      (navigator as Navigator & { standalone?: boolean }).standalone === true;
+  } catch {
+    standalone = false;
+  }
+  return `${standalone ? 'pwa' : 'web'}/${v}`;
+}
+
 // A fetch wrapper that always attaches an AbortController timeout and maps
 // failures to ApiError. status 0 = network/offline/timeout (retryable).
 async function timedFetch(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
   const ctrl = new AbortController();
   const t = window.setTimeout(() => ctrl.abort(), timeoutMs);
+  const headers = new Headers(init.headers ?? undefined);
+  headers.set('X-Harahachi-Client', clientHeaderValue());
   try {
-    return await fetch(url, { ...init, signal: ctrl.signal });
+    return await fetch(url, { ...init, headers, signal: ctrl.signal });
   } catch (e) {
     const aborted = (e as Error)?.name === 'AbortError';
     throw new ApiError(

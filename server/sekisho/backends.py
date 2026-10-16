@@ -590,17 +590,34 @@ def _content_of(status: int, data) -> str:
 
 
 async def _one_completion(backend: dict, messages: list[dict], max_tokens: int, temperature: float,
-                          op: str, remaining: float | None = None) -> str:
-    base = check_backend_url(backend["base_url"])
-    payload = {
-        "model": backend["model"],
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    }
-    status, data = await _http_post_json(f"{base}/chat/completions", payload, _headers(backend),
-                                         _timeout(op, remaining))
-    return _content_of(status, data)
+                          op: str, remaining: float | None = None, slot: str | None = None) -> str:
+    """One upstream chat-completions call. Every attempt (primary, fallback,
+    failover) is recorded as one ``llm_calls`` row (v6 ops instrumentation)."""
+    from . import usage
+    slot = slot or ("analyze" if op == "analyze" else "chat")
+    t0 = time.perf_counter()
+    status: int | None = None
+    data = None
+    try:
+        base = check_backend_url(backend["base_url"])
+        payload = {
+            "model": backend["model"],
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        status, data = await _http_post_json(f"{base}/chat/completions", payload, _headers(backend),
+                                             _timeout(op, remaining))
+        content = _content_of(status, data)
+    except Exception as e:
+        tin, tout = usage.usage_tokens(data)
+        usage.record_llm_call(slot, backend.get("model"), False, int((time.perf_counter() - t0) * 1000),
+                              tin, tout, usage.error_code_for(e, status))
+        raise
+    tin, tout = usage.usage_tokens(data)
+    usage.record_llm_call(slot, backend.get("model"), True, int((time.perf_counter() - t0) * 1000),
+                          tin, tout)
+    return content
 
 
 def _nim_backend(model: str) -> dict:
@@ -622,7 +639,7 @@ async def _nim_completion(task: str, messages: list[dict], max_tokens: int, temp
             break
         try:
             return await _one_completion(_nim_backend(model), messages, max_tokens, temperature,
-                                         op, remaining - 0.5)
+                                         op, remaining - 0.5, slot=task)
         except Exception as e:  # noqa: BLE001 — try the fallback model
             last_err = e
     raise BackendUnavailable(scrub(str(last_err)) if last_err else "LLM budget exhausted")
@@ -645,13 +662,15 @@ async def chat_completion(
     chain = _candidate_chain(need_vision)
     if not chain:
         raise BackendUnavailable("no enabled backend with the needed capability")
+    slot = task or ("analyze" if need_vision else "chat")
     last_err: Exception | None = None
     for backend in chain:
         remaining = deadline - time.monotonic()
         if remaining < 2.0:
             break
         try:
-            return await _one_completion(backend, messages, max_tokens, temperature, op, remaining - 0.5)
+            return await _one_completion(backend, messages, max_tokens, temperature, op, remaining - 0.5,
+                                         slot=slot)
         except Exception as e:  # noqa: BLE001 — try the next backend
             last_err = e
             continue
@@ -766,8 +785,19 @@ async def passthrough_chat_completions(payload: dict) -> tuple[int, dict]:
     except (TypeError, ValueError):
         mt = LLM_MAX_TOKENS_CAP
     body["max_tokens"] = max(1, min(mt, LLM_MAX_TOKENS_CAP))
-    status, data = await _http_post_json(f"{base}/chat/completions", body, _headers(backend),
-                                         _timeout("passthrough", _cfg().llm_budget))
+    from . import usage
+    t0 = time.perf_counter()
+    try:
+        status, data = await _http_post_json(f"{base}/chat/completions", body, _headers(backend),
+                                             _timeout("passthrough", _cfg().llm_budget))
+    except Exception as e:
+        usage.record_llm_call("passthrough", backend.get("model"), False,
+                              int((time.perf_counter() - t0) * 1000), error_code=usage.error_code_for(e))
+        raise
+    _ok = status < 400 and isinstance(data, dict)
+    _tin, _tout = usage.usage_tokens(data)
+    usage.record_llm_call("passthrough", backend.get("model"), _ok, int((time.perf_counter() - t0) * 1000),
+                          _tin, _tout, None if _ok else usage.error_code_for(None, status))
     if data is None:
         raise BackendUnavailable("backend returned non-JSON response")
     if status >= 500:

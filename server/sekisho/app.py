@@ -26,13 +26,16 @@ from . import (
     db,
     feedback,
     images,
+    ops,
     push,
     security,
     suggestions as sug,
+    usage,
 )
 from . import admin
 from .accounts import AccountError
 from .admin import router as admin_router
+from .ops import router as ops_router
 from .config import config
 from pydantic import ValidationError
 
@@ -128,6 +131,10 @@ async def request_logger(request: Request, call_next):
     response = await call_next(request)
     try:
         path = request.url.path
+        # Ops API (server-to-server, Bansho) traffic is neither logged nor
+        # counted: it is not app usage, and its writes are in ops_audit.
+        if ops.is_ops_path(path):
+            return response
         dev = getattr(request.state, "device", None)
         anonymous_miss = (dev is None and response.status_code in (401, 404)
                           and not admin._valid_session(request.cookies.get(admin.COOKIE)))
@@ -137,6 +144,9 @@ async def request_logger(request: Request, call_next):
                                    or path.startswith("/llm/")):
             duration_ms = int((_time.perf_counter() - _t0) * 1000)
             with db.cursor() as cur:
+                # v6: per-day request / 5xx / latency-histogram counters (ops
+                # timeseries), one multi-row upsert on the same connection.
+                usage.bump_stats(usage.request_metrics(response.status_code, duration_ms), cur=cur)
                 cur.execute(
                     "INSERT INTO request_log "
                     "(device_id, device_name, method, path, status, at, user_id, duration_ms) "
@@ -162,6 +172,22 @@ async def request_logger(request: Request, call_next):
     except Exception:
         pass
     return response
+
+
+# ---------- ops API gate (/api/ops/*) ----------
+# Runs BEFORE routing: without a valid SEKISHO_OPS_TOKEN every /api/ops path
+# (any method, existing or not) answers exactly like an unknown route (404), so
+# the surface is invisible. Sits inside security_headers (headers still apply)
+# and outside request_logger (refused probes are never logged).
+@app.middleware("http")
+async def ops_gate(request: Request, call_next):
+    if not ops.is_ops_path(request.url.path):
+        return await call_next(request)
+    if not ops.authorized(request.headers.get("authorization")):
+        return ops.not_found()
+    if not ops.rate_ok():
+        return err("rate_limited", "ops API rate limit exceeded", 429)
+    return await call_next(request)
 
 
 # ---------- request size cap (clean 413 envelope) ----------
@@ -219,12 +245,18 @@ async def require_device(request: Request, authorization: str = Header(default="
     if not authorization.lower().startswith("bearer "):
         raise AuthError("missing_bearer", "Authorization: Bearer <device_key> required", 401)
     key = authorization.split(" ", 1)[1].strip()
-    device = security.resolve_device(key)
+    # v6: X-Harahachi-Client (apk|pwa|web/<version>) is stored on the device row
+    # in the same UPDATE as last_seen; malformed values are ignored.
+    client = usage.parse_client(request.headers.get("x-harahachi-client"))
+    device = security.resolve_device(key, client=client)
     if device is None:
         raise AuthError("invalid_key", "Unknown or revoked device key", 401)
     if not security.rate_limit_ok(device["device_id"]):
         raise AuthError("rate_limited", f"{config.rate_limit_per_min} {RATE_LIMIT_MSG}", 429)
     request.state.device = device
+    uid = device.get("active_user_id")
+    usage.set_request_user(uid)   # llm_calls attribution for this request
+    usage.mark_active(uid)        # DAU: <= 1 write per user per day per instance
     return device
 
 
@@ -283,6 +315,7 @@ def _llm_cap_or_none(device: dict) -> JSONResponse | None:
     credits (analyze, body-photo, chat, insights, suggestions, /llm/v1)."""
     which = security.llm_caps_exceeded(device.get("active_user_id"), device.get("device_id"))
     if which:
+        usage.bump_stats({"cap_hits": 1})
         cap = {"user": config.daily_llm_cap, "device": config.device_daily_llm_cap,
                "global": config.global_daily_llm_cap}[which]
         return err("daily_cap", _CAP_MSG[which].format(cap=cap), 429)
@@ -362,6 +395,7 @@ async def auth_register(body: RegisterIn, device: dict = Depends(require_device)
     # New active user on this phone: the previous account's reminders stop here.
     push.unsubscribe_device(device["device_id"], keep_user_id=user["id"])
     security.set_active_user(device["device_id"], user["id"])
+    usage.mark_active(user["id"])
     # Optional initial profile.
     if body.profile is not None:
         _save_profile(user["id"], body.profile)
@@ -375,6 +409,7 @@ async def auth_login(body: LoginIn, device: dict = Depends(require_device)):
         # Account switch: drop the previous user's push subscription on this device.
         push.unsubscribe_device(device["device_id"], keep_user_id=user["id"])
     security.set_active_user(device["device_id"], user["id"])
+    usage.mark_active(user["id"])
     profile = _load_profile_out(user["id"])
     return {"user": user, "profile": profile.model_dump() if profile else None}
 
@@ -931,7 +966,7 @@ def _execute_action(user_id: int, action: dict) -> dict | None:
             if m is None:
                 return None
             meal = _log_meal(user_id, m.dish, m.calories, m.protein_g, m.carbs_g, m.fat_g,
-                             security.now_iso(), "suggestion")
+                             security.now_iso(), "chat")
             return {"action": "log_meal", "meal": meal.model_dump()}
         if kind == "log_workout":
             wk = _workout_from_action(action)
@@ -1157,17 +1192,35 @@ async def keeper_backends_active(
     return {"ok": True}
 
 
-# mount admin
+# mount admin + the server-to-server ops API (gated by ops_gate above)
 app.include_router(admin_router)
+app.include_router(ops_router)
+
+
+class _CORSExceptOps:
+    """CORSMiddleware for everything EXCEPT /api/ops/*: the ops API is
+    server-to-server only, so it never answers preflights or emits
+    Access-Control-* headers (a browser can never read it cross-origin)."""
+
+    def __init__(self, app, **cors_kwargs):
+        self.app = app
+        self.cors = CORSMiddleware(app, **cors_kwargs)
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and ops.is_ops_path(scope.get("path", "")):
+            await self.app(scope, receive, send)
+            return
+        await self.cors(scope, receive, send)
+
 
 # CORS last => OUTERMOST middleware, so even 413/429/401 envelopes carry the
 # CORS headers the APK (capacitor://localhost / https://localhost) needs to read
 # them. Bearer-key auth, no cookies cross-origin => allow_credentials=False.
 app.add_middleware(
-    CORSMiddleware,
+    _CORSExceptOps,
     allow_origins=config.cors_allowed_origins(),
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token"],
+    allow_headers=["Authorization", "Content-Type", "X-CSRF-Token", "X-Harahachi-Client"],
     max_age=600,
 )

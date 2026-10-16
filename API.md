@@ -66,7 +66,9 @@ when the server has no internet and mock is enabled. Auth + rate limit apply.
 
 ### `POST /meals`  — log a confirmed meal
 `{ "dish": str, "calories": int, "protein_g": int, "carbs_g": int, "fat_g": int,
-   "eaten_at": iso8601?, "source": "photo"|"manual"|"suggestion" }`
+   "eaten_at": iso8601?, "source": "photo"|"manual"|"suggestion"|"barcode"|"quicklog"|"chat" }`
+(v6: `barcode`, `quicklog` and `chat` let the ops console split meals by entry
+path. Meals Annai logs server-side are stored as `chat`.)
 → `201` with the stored meal (`id`, `eaten_at` filled).
 
 ### `GET /meals?date=YYYY-MM-DD` / `GET /meals?from=&to=`
@@ -273,6 +275,29 @@ chat calls to protect NIM credits.
 
 **Data:** the Vercel deployment starts fresh on Neon Postgres; there is no
 DGX migration path. Phones pair to the stable `https://<project>.vercel.app` URL.
+
+## v6: usage instrumentation + server-to-server ops API (`/api/ops/v1`)
+
+- **Client header.** The app sends `X-Harahachi-Client: apk/<version>` (Capacitor
+  shell), `pwa/<version>` (installed, display-mode standalone) or `web/<version>`
+  on every request. The server validates it (`^(apk|pwa|web)/[0-9A-Za-z.+_-]{1,32}$`,
+  anything else is ignored) and stores `client_kind` + `client_version` on the
+  device row, in the same UPDATE that bumps `last_seen`.
+- **`llm_calls`.** One row per upstream LLM call (primary, fallback and failover
+  attempts each count): `at, user_id, slot (analyze|body|chat|insights|passthrough),
+  model, ok, ms, tokens_in, tokens_out, error_code`. Tokens come from the provider's
+  `usage` block when present.
+- **Active days.** `user_active_days(user_id, day)`: one row per user per
+  `SEKISHO_TZ`-local day with any authenticated request. Each instance caches the
+  rows it has written, so this is at most one write per user per day.
+- **Daily counters.** `daily_stats(day, metric, n)` stores requests, 5xx, a latency
+  histogram, daily-cap hits and pushes sent/failed. They outlive the 500-row request log.
+- **Ops API.** `/api/ops/v1/{summary,timeseries,retention,funnel,users,users/{id},
+  requests,audit,actions}` for the private Bansho console. Auth is
+  `Authorization: Bearer $SEKISHO_OPS_TOKEN` (48+ chars, constant-time compare).
+  Unset, short or wrong tokens get `404`, exactly like an unknown route. No CORS, a
+  separate rate limit (300/min), never logged, and every action is written to
+  `ops_audit`. The full contract is in Bansho's `SPEC.md`.
 
 ## LLM API passthrough — `/llm/v1/*` (NOT under /api/v1)
 

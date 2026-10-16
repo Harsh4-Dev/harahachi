@@ -149,6 +149,13 @@ newlines when it loads the key.
 | `VAPID_PRIVATE_KEY` | Web-push private key (one-line PEM with literal `\n`). On Vercel push is disabled until both VAPID keys are set. | `python server/tools/gen_vapid.py` |
 | `VAPID_SUBJECT` | Contact URI sent to the push services. The default is `mailto:admin@harahachi.local`. Set a real one, because some push services reject fake addresses. | e.g. `mailto:you@example.com` |
 
+### Optional (private ops console, Bansho)
+
+| Name | What it does | How to get it |
+|---|---|---|
+| `SEKISHO_OPS_TOKEN` | Bearer token for the server-to-server ops API at `/api/ops/v1/*` (analytics + admin actions for the private Bansho console). Use **at least 48 characters**. If it is unset, shorter than 48 characters, or wrong, every `/api/ops/*` path answers `404` as if it did not exist. Compared in constant time. Never logged or echoed, and no CORS, so only a server can call it. Put the **same value** in Bansho's `HARAHACHI_OPS_TOKEN`. | `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
+| `SEKISHO_TZ` | IANA timezone that defines "a day" for ops analytics (DAU, today's totals, timeseries, weekly retention cohorts). Default `Asia/Kolkata`. | e.g. `Asia/Kolkata`, `Europe/London` |
+
 ### Optional (defaults are fine)
 
 | Name | Default | What it does |

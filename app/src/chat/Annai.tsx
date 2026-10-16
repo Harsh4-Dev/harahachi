@@ -83,7 +83,7 @@ function mealFromAction(a: ChatAction): MealInput {
     protein_g: a.meal?.protein_g ?? a.protein_g ?? 0,
     carbs_g: a.meal?.carbs_g ?? a.carbs_g ?? 0,
     fat_g: a.meal?.fat_g ?? a.fat_g ?? 0,
-    source: 'suggestion',
+    source: 'chat',
   };
 }
 

@@ -972,6 +972,12 @@ async def admin_push_test(request: Request, user_id: str = Form(default="")):
             target_uid = int(user_id)
         except ValueError:
             return JSONResponse({"error": {"code": "bad_user", "message": "user_id must be int"}}, status_code=400)
+    return send_test_push(target_uid)
+
+
+def send_test_push(target_uid: int | None) -> dict:
+    """Send one test notification to a user's subscriptions (or all when None).
+    Shared by the admin dashboard and the ops API's push_test action."""
     subs = push.subscriptions_for_user(target_uid) if target_uid is not None else push.all_subscriptions()
     if not subs:
         scope = f"user {target_uid}" if target_uid is not None else "any user"

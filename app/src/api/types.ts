@@ -4,7 +4,8 @@ export type Sex = 'm' | 'f' | 'x';
 export type Activity = 'sedentary' | 'light' | 'moderate' | 'active';
 export type Goal = 'cut' | 'maintain' | 'bulk';
 export type Portion = 'small' | 'regular' | 'large';
-export type MealSource = 'photo' | 'manual' | 'suggestion';
+// v6: barcode | quicklog | chat let the ops console split meals by entry path.
+export type MealSource = 'photo' | 'manual' | 'suggestion' | 'barcode' | 'quicklog' | 'chat';
 export type DayStatus = 'under' | 'on' | 'over' | 'empty';
 
 export interface Macros {

@@ -122,7 +122,9 @@ class MealIn(BaseModel):
     sodium_mg: Optional[int] = Field(default=None, ge=0, le=100000)
     # ISO-8601 datetime (e.g. 2026-05-01T12:00:00 or ...Z), bounded.
     eaten_at: Optional[str] = Field(default=None, max_length=40)
-    source: Literal["photo", "manual", "suggestion"] = "manual"
+    # v6: barcode / quicklog / chat added so ops analytics can split meals by
+    # entry path (older clients keep sending photo|manual|suggestion).
+    source: Literal["photo", "manual", "suggestion", "barcode", "quicklog", "chat"] = "manual"
 
     @field_validator("eaten_at")
     @classmethod

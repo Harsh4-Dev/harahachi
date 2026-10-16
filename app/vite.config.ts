@@ -1,9 +1,19 @@
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
+// App version (package.json) baked in at build time; sent to Sekisho in the
+// X-Harahachi-Client header (apk|pwa|web/<version>) for ops analytics.
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf-8')) as {
+  version?: string;
+};
+
 // https://vite.dev/config/
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version ?? '0.0.0'),
+  },
   server: {
     host: true, // dev only: lets a phone on the same Wi-Fi open the dev server
     port: 5173,

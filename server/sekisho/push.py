@@ -347,7 +347,19 @@ def send_to_subscriptions(subs: list[dict], payload: dict) -> dict:
             if status in (404, 410):
                 _prune_subscription(s["id"])
                 pruned += 1
+    try:  # v6 ops analytics: per-day push counters (never breaks a send)
+        from . import usage
+        usage.bump_stats({"pushes_sent": sent, "pushes_failed": len(subs) - sent})
+    except Exception:  # noqa: BLE001
+        pass
     return {"sent": sent, "pruned": pruned, "total": len(subs), "errors": errors}
+
+
+def vapid_configured() -> bool:
+    """True when web push can sign messages (env keys, or keys persisted in the DB)."""
+    if os.environ.get("VAPID_PUBLIC_KEY") and os.environ.get("VAPID_PRIVATE_KEY"):
+        return True
+    return bool(db.get_setting("vapid_public_key") and db.get_setting("vapid_private_key"))
 
 
 def _fitting_meal(user_id: int, rem_kcal: int) -> str | None:
@@ -509,8 +521,7 @@ def scheduler_status() -> dict:
     next_fires = sorted(
         _next_fire_utc(now, s["tz_offset_min"]).isoformat() for s in subs
     )
-    vapid_ok = bool((os.environ.get("VAPID_PUBLIC_KEY") and os.environ.get("VAPID_PRIVATE_KEY"))
-                    or (db.get_setting("vapid_public_key") and db.get_setting("vapid_private_key")))
+    vapid_ok = vapid_configured()
     from .config import config
     last_tick = _status["last_tick"] or db.get_setting("push_last_tick")
     if _status["last_tick"]:

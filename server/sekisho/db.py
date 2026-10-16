@@ -39,7 +39,7 @@ class ConfigError(RuntimeError):
     """The storage backend is not configured correctly (e.g. no DATABASE_URL on Vercel)."""
 
 
-SCHEMA_VERSION = "5"
+SCHEMA_VERSION = "6"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS devices (
@@ -50,7 +50,10 @@ CREATE TABLE IF NOT EXISTS devices (
     last_seen       TEXT,
     req_count       INTEGER NOT NULL DEFAULT 0,
     revoked         INTEGER NOT NULL DEFAULT 0,
-    active_user_id  INTEGER
+    active_user_id  INTEGER,
+    -- v6: which client this device runs (X-Harahachi-Client: apk|pwa|web/<version>)
+    client_kind     TEXT,
+    client_version  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -231,17 +234,63 @@ CREATE TABLE IF NOT EXISTS llm_cache (
     PRIMARY KEY (user_id, key)
 );
 
+-- v6: one row per upstream LLM call (ops analytics: calls/errors/latency/tokens per slot).
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          TEXT NOT NULL,
+    user_id     INTEGER,
+    slot        TEXT NOT NULL,
+    model       TEXT,
+    ok          INTEGER NOT NULL DEFAULT 0,
+    ms          INTEGER,
+    tokens_in   INTEGER,
+    tokens_out  INTEGER,
+    error_code  TEXT
+);
+
+-- v6: a user is active on a (SEKISHO_TZ-local) day if they made any
+-- authenticated request that day. At most one write per user per day.
+CREATE TABLE IF NOT EXISTS user_active_days (
+    user_id     INTEGER NOT NULL,
+    day         TEXT NOT NULL,
+    PRIMARY KEY (user_id, day)
+);
+
+-- v6: per-day counters that outlive the 500-row request log (requests, 5xx,
+-- latency histogram buckets, daily-cap hits, pushes). day = SEKISHO_TZ-local date.
+CREATE TABLE IF NOT EXISTS daily_stats (
+    day         TEXT NOT NULL,
+    metric      TEXT NOT NULL,
+    n           BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, metric)
+);
+
+-- v6: every write made through the server-to-server ops API (/api/ops/v1).
+CREATE TABLE IF NOT EXISTS ops_audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    target      TEXT,
+    params_json TEXT,
+    result      TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_meals_user_time ON meals(user_id, eaten_at);
 CREATE INDEX IF NOT EXISTS idx_workouts_user_time ON workouts(user_id, done_at);
 CREATE INDEX IF NOT EXISTS idx_reqlog_at ON request_log(at);
 CREATE INDEX IF NOT EXISTS idx_weights_user_date ON weights(user_id, date);
 CREATE INDEX IF NOT EXISTS idx_counters_expires ON counters(expires);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_at ON llm_calls(at);
+CREATE INDEX IF NOT EXISTS idx_llm_calls_user_at ON llm_calls(user_id, at);
+CREATE INDEX IF NOT EXISTS idx_active_days_day ON user_active_days(day);
+CREATE INDEX IF NOT EXISTS idx_users_created ON users(created_at);
 """
 
 # Tables whose primary key is an auto-generated integer ``id`` (lastrowid emulation
 # and sequence fix-ups after a data migration).
 IDENTITY_TABLES = frozenset({
     "users", "meals", "workouts", "request_log", "backends", "push_subscriptions", "weights",
+    "llm_calls", "ops_audit",
 })
 
 
@@ -655,8 +704,14 @@ def _ensure_columns(cur) -> None:
     already-upgraded DB is a no-op and existing rows/data are preserved.
     """
     real = "DOUBLE PRECISION" if is_postgres() else "REAL"
-    if "active_user_id" not in _columns(cur, "devices"):
+    dcols = _columns(cur, "devices")
+    if "active_user_id" not in dcols:
         cur.execute("ALTER TABLE devices ADD COLUMN active_user_id INTEGER")
+    # v6: client kind/version reported by the X-Harahachi-Client header.
+    if "client_kind" not in dcols:
+        cur.execute("ALTER TABLE devices ADD COLUMN client_kind TEXT")
+    if "client_version" not in dcols:
+        cur.execute("ALTER TABLE devices ADD COLUMN client_version TEXT")
     # phone-admin flag on users (idempotent — no-op once present).
     if _table_exists(cur, "users") and "is_admin" not in _columns(cur, "users"):
         cur.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")

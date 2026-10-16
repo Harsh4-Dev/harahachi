@@ -58,7 +58,7 @@ export function QuickLogCarousel({ onLog }: Props) {
         protein_g: m.protein_g,
         carbs_g: m.carbs_g,
         fat_g: m.fat_g,
-        source: 'suggestion',
+        source: 'quicklog',
         ...(m.fiber_g != null ? { fiber_g: m.fiber_g } : {}),
         ...(m.sugar_g != null ? { sugar_g: m.sugar_g } : {}),
         ...(m.sodium_mg != null ? { sodium_mg: m.sodium_mg } : {}),

@@ -73,7 +73,7 @@ export function BarcodeCard({ result, onRescan, onLog, onManual }: Props) {
       protein_g: scaled.protein_g,
       carbs_g: scaled.carbs_g,
       fat_g: scaled.fat_g,
-      source: 'manual',
+      source: 'barcode',
       ...(hasExtras
         ? { fiber_g: scaled.fiber_g, sugar_g: scaled.sugar_g, sodium_mg: scaled.sodium_mg }
         : {}),

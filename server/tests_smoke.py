@@ -2241,6 +2241,891 @@ def _():
               for f in ("API.md", ".vercelignore", "DEPLOY_VERCEL.md")), "")
 
 
+# ===========================================================================
+# V6: usage instrumentation + server-to-server ops API (/api/ops/v1)
+# Contract: D:\linux_workspace\bansho\SPEC.md ("Harahachi — base /api/ops/v1").
+# ===========================================================================
+import base64 as _b64_6
+import inspect as _insp6
+from datetime import date as _date6, time as _time6, timedelta as _td6, timezone as _tzm6
+from sekisho import ops as _ops, usage as _usage
+from sekisho import accounts as _acc6
+
+config.tz_name = "Asia/Kolkata"
+_IST = _tzm6(_td6(hours=5, minutes=30))  # independent reference: Kolkata has no DST
+_UTC6 = _tzm6.utc
+_OPS_TOKEN = "ops-" + "S3cr3t-Token_" * 4 + "end"        # 59 chars
+config.ops_token = _OPS_TOKEN
+_opsc = TestClient(app)  # bare client: no cookies, no default CSRF header
+_OPS_RESPONSES: list = []  # every ops response, scanned for the token at the end
+
+
+def _oh(tok: str | None = None) -> dict:
+    return {"Authorization": f"Bearer {tok if tok is not None else _OPS_TOKEN}"}
+
+
+def _og(path: str, **kw):
+    r = _opsc.get(path, headers=_oh(), **kw)
+    _OPS_RESPONSES.append(r)
+    return r
+
+
+def _op(body):
+    r = _opsc.post("/api/ops/v1/actions", headers=_oh(), json=body)
+    _OPS_RESPONSES.append(r)
+    return r
+
+
+def _uid_of(key: str) -> int:
+    relax(key)
+    return client.get("/api/v1/auth/me", headers=bearer(key)).json()["user"]["id"]
+
+
+def _z(dt) -> str:
+    return dt.astimezone(_UTC6).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _ist_midnight(d):
+    return __import__("datetime").datetime.combine(d, _time6(0, 0), tzinfo=_IST)
+
+
+def _ins_user(name: str, created_at: str) -> int:
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO users (username, pin_hash, pin_salt, created_at) VALUES (?,?,?,?)",
+                    (name, "x", "y", created_at))
+        return cur.lastrowid
+
+
+def _ins_meal(uid: int, at: str, source: str) -> None:
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO meals (user_id, dish, calories, protein_g, carbs_g, fat_g, eaten_at, source) "
+                    "VALUES (?,?,?,?,?,?,?,?)", (uid, "seed", 100, 1, 1, 1, at, source))
+
+
+def _ins_llm(uid, at: str, slot: str, ok: bool, tin=None, tout=None, ms=100) -> None:
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO llm_calls (at, user_id, slot, model, ok, ms, tokens_in, tokens_out, error_code) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (at, uid, slot, "seed/model", 1 if ok else 0, ms, tin, tout, None if ok else "http_500"))
+
+
+def _ins_active(uid: int, day: str) -> None:
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO user_active_days (user_id, day) VALUES (?,?) "
+                    "ON CONFLICT(user_id, day) DO NOTHING", (uid, day))
+
+
+def _today_ist():
+    return __import__("datetime").datetime.now(_IST).date()
+
+
+def _stat_today(metric: str) -> int:
+    with db.cursor() as cur:
+        row = cur.execute("SELECT n FROM daily_stats WHERE day=? AND metric=?",
+                          (_usage.local_today().isoformat(), metric)).fetchone()
+    return int(row["n"]) if row else 0
+
+
+# ---------------------------------------------------------------- gate -----
+@_audit("v6 ops gate")
+def _():
+    unknown = _opsc.get("/api/v1/definitely-not-a-route")
+    try:
+        config.ops_token = ""
+        r = _opsc.get("/api/ops/v1/summary", headers=_oh())
+        check("v6 ops: SEKISHO_OPS_TOKEN unset -> 404 identical to an unknown route",
+              r.status_code == 404 and r.json() == unknown.json(), f"{r.status_code} {r.text[:60]}")
+        config.ops_token = "short-token-" * 3 + "abcdefghij"  # 46 chars
+        r = _opsc.get("/api/ops/v1/summary", headers=_oh(config.ops_token))
+        check("v6 ops: token shorter than 48 chars -> 404 even when sent exactly",
+              r.status_code == 404 and r.json() == unknown.json(), str(r.status_code))
+    finally:
+        config.ops_token = _OPS_TOKEN
+    cases = {
+        "no Authorization": {},
+        "wrong token": _oh(_OPS_TOKEN[:-1] + "X"),
+        "token prefix only": _oh(_OPS_TOKEN[:48]),
+        "token + suffix": _oh(_OPS_TOKEN + "x"),
+        "no Bearer scheme": {"Authorization": _OPS_TOKEN},
+        "Basic scheme": {"Authorization": "Basic " + _OPS_TOKEN},
+        "device key": bearer(DEVICE_KEY),
+    }
+    bad = {}
+    for label, h in cases.items():
+        for method, path in (("GET", "/api/ops/v1/summary"), ("GET", "/api/ops/v1/users"),
+                             ("POST", "/api/ops/v1/actions"), ("GET", "/api/ops/v1/nope"),
+                             ("DELETE", "/api/ops/v1/summary")):
+            rr = _opsc.request(method, path, headers=h, json={"action": "pairing_token"})
+            if rr.status_code != 404 or rr.json() != unknown.json():
+                bad[f"{label} {method} {path}"] = rr.status_code
+    check("v6 ops: missing / wrong / partial / other-scheme tokens -> 404 on every path + method",
+          not bad, str(bad)[:200])
+    check("v6 ops: token compare is constant-time (hmac.compare_digest)",
+          "compare_digest" in _insp6.getsource(_ops.authorized), "")
+    r = _og("/api/ops/v1/summary")
+    check("v6 ops: valid token -> 200", r.status_code == 200, str(r.status_code))
+    r = _opsc.get("/api/ops/v1/nope", headers=_oh())
+    check("v6 ops: authorized but unknown ops path -> 404", r.status_code == 404, str(r.status_code))
+
+    # no CORS on ops routes (but the app's CORS still works, incl. the new header)
+    origin = "capacitor://localhost"
+    pre = _opsc.options("/api/ops/v1/summary", headers={
+        "Origin": origin, "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "authorization"})
+    r = _opsc.get("/api/ops/v1/summary", headers={**_oh(), "Origin": origin})
+    _OPS_RESPONSES.append(r)
+    check("v6 ops: no CORS - preflight 404, and no Access-Control-* header even with a valid token",
+          pre.status_code == 404 and not any(k.lower().startswith("access-control") for k in pre.headers)
+          and r.status_code == 200 and not any(k.lower().startswith("access-control") for k in r.headers),
+          f"pre={pre.status_code} hdrs={[k for k in r.headers if k.lower().startswith('access-control')]}")
+    apre = _opsc.options("/api/v1/meals", headers={
+        "Origin": origin, "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "authorization,x-harahachi-client"})
+    check("v6 app CORS preflight allows X-Harahachi-Client",
+          apre.status_code == 200 and "x-harahachi-client" in apre.headers.get(
+              "access-control-allow-headers", "").lower(), str(apre.headers.get("access-control-allow-headers")))
+
+    # security headers on both the hidden 404 and the authorized response
+    hidden = _opsc.get("/api/ops/v1/summary")
+    want = {"content-security-policy": "default-src 'none'", "x-content-type-options": "nosniff",
+            "cache-control": "no-store", "strict-transport-security": "max-age=", "x-frame-options": "DENY"}
+    miss = [f"{tag}:{k}" for tag, resp in (("404", hidden), ("200", r))
+            for k, v in want.items() if v not in resp.headers.get(k, "")]
+    check("v6 ops: API security headers on ops responses (404 + 200)", not miss, str(miss))
+
+    # vercel.json: /api/ops/* reaches the function via the existing /api/(.*) rewrite,
+    # and is NOT covered by the static-site header rule (FastAPI sets its headers).
+    def _first_rewrite(path):
+        for rw in _vj["rewrites"]:
+            if _re4.match("^" + rw["source"] + "$", path):
+                return rw["destination"]
+        return None
+    static_src = next(blk["source"] for blk in _vj["headers"]
+                      if any(h["key"] == "Content-Security-Policy" for h in blk["headers"]))
+    check("v6 vercel.json: /api/ops/v1/* routes through the /api/(.*) rewrite to the function",
+          all(_first_rewrite(p) == "/api/index" for p in ("/api/ops/v1/summary", "/api/ops/v1/users/3",
+                                                          "/api/ops/v1/actions"))
+          and not _re4.match("^" + static_src + "$", "/api/ops/v1/summary"),
+          str(_first_rewrite("/api/ops/v1/summary")))
+
+
+# ---------------------------------------------------------- client kind ----
+@_audit("v6 client header")
+def _():
+    key = _fresh("opsclient", profile=_PROFILE)
+    did = _dev_id(key)
+
+    def kind():
+        with db.cursor() as cur:
+            row = cur.execute("SELECT client_kind, client_version FROM devices WHERE device_id=?",
+                              (did,)).fetchone()
+        return (row["client_kind"], row["client_version"])
+
+    check("v6 client: no header -> client_kind stays NULL", kind() == (None, None), str(kind()))
+    relax(key)
+    client.get("/api/v1/auth/me", headers={**bearer(key), "X-Harahachi-Client": "apk/1.4.2"})
+    check("v6 client: X-Harahachi-Client apk/1.4.2 stored on the device row", kind() == ("apk", "1.4.2"),
+          str(kind()))
+    for junk in ("evil/1.0", "apk/", "apk", "apk/1.0 <script>", "web/" + "9" * 40, "APK/1.0",
+                 "pwa/1.0;drop", "apk/../../x"):
+        client.get("/api/v1/auth/me", headers={**bearer(key), "X-Harahachi-Client": junk})
+    check("v6 client: malformed header values are ignored (row unchanged)", kind() == ("apk", "1.4.2"),
+          str(kind()))
+    client.get("/api/v1/auth/me", headers={**bearer(key), "X-Harahachi-Client": "pwa/2.0.0-beta.1"})
+    k1 = kind()
+    client.get("/api/v1/auth/me", headers={**bearer(key), "X-Harahachi-Client": "web/1.0.0"})
+    check("v6 client: pwa/<v> and web/<v> are stored too", k1 == ("pwa", "2.0.0-beta.1")
+          and kind() == ("web", "1.0.0"), f"{k1} {kind()}")
+    check("v6 client: parse_client unit", _usage.parse_client("apk/1.0.0") == ("apk", "1.0.0")
+          and _usage.parse_client(None) is None and _usage.parse_client(" web/2 ") == ("web", "2"), "")
+    relax(key)
+
+
+# ---------------------------------------------------------- active days ----
+@_audit("v6 active days")
+def _():
+    key = _fresh("opsactive", profile=_PROFILE)
+    uid = _uid_of(key)
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM user_active_days WHERE user_id=?", (uid,))
+    _usage.reset_active_cache()
+
+    def rows():
+        with db.cursor() as cur:
+            return [r["day"] for r in cur.execute(
+                "SELECT day FROM user_active_days WHERE user_id=? ORDER BY day", (uid,)).fetchall()]
+
+    for _i in range(4):
+        client.get("/api/v1/meals", headers=bearer(key))
+    today = _usage.local_today().isoformat()
+    check("v6 active days: several authenticated requests -> exactly one row for today",
+          rows() == [today], str(rows()))
+    check("v6 active days: in-process cache skips the write after the first one",
+          _usage.mark_active(uid) is False, "")
+    _usage.reset_active_cache()
+    client.get("/api/v1/meals", headers=bearer(key))
+    check("v6 active days: a fresh instance (empty cache) still counts the day once (ON CONFLICT)",
+          rows() == [today], str(rows()))
+    tomorrow_noon = __import__("datetime").datetime.now(_UTC6) + _td6(days=1)
+    _usage.mark_active(uid, now=tomorrow_noon)
+    check("v6 active days: next day -> a second row", len(rows()) == 2, str(rows()))
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM user_active_days WHERE user_id=? AND day>?", (uid, today))
+    _usage.reset_active_cache()
+    d = __import__("datetime").datetime
+    check("v6 active days: day boundary is SEKISHO_TZ midnight (18:30Z for Asia/Kolkata)",
+          _usage.local_today(d(2026, 3, 1, 18, 29, 59, tzinfo=_UTC6)).isoformat() == "2026-03-01"
+          and _usage.local_today(d(2026, 3, 1, 18, 30, 0, tzinfo=_UTC6)).isoformat() == "2026-03-02", "")
+    relax(key)
+
+
+# ------------------------------------------------------------- llm_calls ---
+class _FakeLLMUsage(_FakeLLM):
+    """NIM stub that also returns an OpenAI-style usage block; optionally fails
+    the first `fail_first` calls with HTTP 500."""
+
+    def __init__(self, fail_first: int = 0):
+        super().__init__()
+        self.fail_first = fail_first
+
+    async def _post(self, url, payload, headers, timeout):
+        status, data = await super()._post(url, payload, headers, timeout)
+        if self.fail_first > 0:
+            self.fail_first -= 1
+            return 500, {"error": "boom"}
+        data["usage"] = {"prompt_tokens": 111, "completion_tokens": 22, "total_tokens": 133}
+        return status, data
+
+
+def _llm_rows_after(mark: int) -> list:
+    with db.cursor() as cur:
+        return [dict(r) for r in cur.execute(
+            "SELECT * FROM llm_calls WHERE id>? ORDER BY id", (mark,)).fetchall()]
+
+
+def _llm_mark() -> int:
+    with db.cursor() as cur:
+        row = cur.execute("SELECT COALESCE(MAX(id),0) AS n FROM llm_calls").fetchone()
+    return int(row["n"])
+
+
+@_audit("v6 llm_calls")
+def _():
+    key = _fresh("opsllm", profile=_PROFILE)
+    uid = _uid_of(key)
+    with _FakeLLMUsage() as _f:
+        _caps()
+        mark = _llm_mark()
+        r = client.post("/api/v1/meals/analyze", headers=bearer(key),
+                        files={"image": ("m.png", PNG, "image/png")}, data={"hint": "dal"})
+        rows = _llm_rows_after(mark)
+        a = rows[0] if rows else {}
+        check("v6 llm_calls: analyze -> one row (slot analyze, ok, user, model, ms, usage tokens)",
+              r.status_code == 200 and len(rows) == 1 and a["slot"] == "analyze" and a["ok"] == 1
+              and a["user_id"] == uid and a["model"] == backends.slot_config("analyze")["model"]
+              and a["tokens_in"] == 111 and a["tokens_out"] == 22 and a["ms"] >= 0 and a["error_code"] is None
+              and a["at"], f"{r.status_code} {rows}")
+        relax(key)
+        mark = _llm_mark()
+        r = client.post("/api/v1/chat", headers=bearer(key),
+                        json={"messages": [{"role": "user", "content": "how am I doing?"}]})
+        rows = _llm_rows_after(mark)
+        check("v6 llm_calls: chat -> row with slot chat + tokens from usage",
+              r.status_code == 200 and len(rows) >= 1 and all(x["slot"] == "chat" for x in rows)
+              and rows[-1]["ok"] == 1 and rows[-1]["tokens_in"] == 111 and rows[-1]["tokens_out"] == 22
+              and rows[-1]["user_id"] == uid, f"{r.status_code} {[(x['slot'], x['ok']) for x in rows]}")
+        relax(key)
+        mark = _llm_mark()
+        r = client.post("/llm/v1/chat/completions", headers=bearer(key),
+                        json={"messages": [{"role": "user", "content": "hi"}]})
+        rows = _llm_rows_after(mark)
+        check("v6 llm_calls: /llm/v1 passthrough -> slot passthrough with tokens",
+              r.status_code == 200 and len(rows) == 1 and rows[0]["slot"] == "passthrough"
+              and rows[0]["ok"] == 1 and rows[0]["tokens_in"] == 111, f"{r.status_code} {rows}")
+        relax(key)
+    with _FakeLLMUsage(fail_first=1) as _f:
+        _caps()
+        mark = _llm_mark()
+        r = client.post("/api/v1/meals/analyze", headers=bearer(key),
+                        files={"image": ("m.png", PNG, "image/png")}, data={"hint": "dal"})
+        rows = _llm_rows_after(mark)
+        sc = backends.slot_config("analyze")
+        check("v6 llm_calls: primary 500 + fallback ok -> two rows (http_500 error, then ok on fallback)",
+              r.status_code == 200 and [(x["ok"], x["error_code"], x["model"]) for x in rows]
+              == [(0, "http_500", sc["model"]), (1, None, sc["fallback"])], str(rows))
+        relax(key)
+    import httpx as _hx6
+    check("v6 llm_calls: error codes classify timeouts / connect failures / HTTP status",
+          _usage.error_code_for(_hx6.ReadTimeout("t")) == "timeout"
+          and _usage.error_code_for(_hx6.ConnectError("c")) == "connect"
+          and _usage.error_code_for(None, 429) == "http_429"
+          and _usage.usage_tokens({"usage": {"prompt_tokens": 5, "completion_tokens": True}}) == (5, None)
+          and _usage.usage_tokens(None) == (None, None), "")
+    with db.cursor() as cur:
+        leaked = cur.execute("SELECT COUNT(*) AS n FROM llm_calls WHERE model LIKE ? OR error_code LIKE ?",
+                             ("%" + _NIM_KEY[-12:] + "%", "%" + _NIM_KEY[-12:] + "%")).fetchone()["n"]
+    check("v6 llm_calls: the NIM key never lands in llm_calls", leaked == 0, str(leaked))
+
+
+# ------------------------------------------------------- cap hits / 5xx ----
+@_audit("v6 daily stats")
+def _():
+    key = _fresh("opscap", profile=_PROFILE)
+    with _FakeLLMUsage() as _f:
+        _caps(user=1)
+        before = _stat_today("cap_hits")
+        client.post("/api/v1/chat", headers=bearer(key), json={"messages": [{"role": "user", "content": "a"}]})
+        r = client.post("/api/v1/chat", headers=bearer(key), json={"messages": [{"role": "user", "content": "b"}]})
+        check("v6 stats: a daily-cap refusal increments today's cap_hits",
+              r.status_code == 429 and _stat_today("cap_hits") == before + 1, f"{r.status_code}")
+    relax(key)
+    s1 = _og("/api/ops/v1/summary").json()["today"]
+    _opsc.get("/api/v1/health")
+    s2 = _og("/api/ops/v1/summary").json()["today"]
+    check("v6 stats: one app request -> today.requests +1 (ops calls themselves are not counted)",
+          s2["requests"] == s1["requests"] + 1, f"{s1['requests']} -> {s2['requests']}")
+    saved = (config.provider, config.nvidia_api_key, config.allow_mock)
+    try:
+        config.provider, config.nvidia_api_key, config.allow_mock = "nim", "", False
+        r = client.post("/api/v1/chat", headers=bearer(key), json={"messages": [{"role": "user", "content": "c"}]})
+    finally:
+        config.provider, config.nvidia_api_key, config.allow_mock = saved
+    s3 = _og("/api/ops/v1/summary").json()["today"]
+    check("v6 stats: a 5xx response -> today.errors_5xx +1", r.status_code == 503
+          and s3["errors_5xx"] == s2["errors_5xx"] + 1, f"{r.status_code} {s2['errors_5xx']}->{s3['errors_5xx']}")
+    check("v6 stats: p95 from the latency histogram is the bucket bound",
+          _usage.p95_from_hist({"lat_le_100": 94, "lat_le_1000": 6}) == 1000
+          and _usage.p95_from_hist({"lat_le_100": 95, "lat_le_1000": 5}) == 100
+          and _usage.p95_from_hist({}) == 0 and _usage.lat_metric(99999999) == "lat_gt_max", "")
+    with db.cursor() as cur:
+        n_ops = cur.execute("SELECT COUNT(*) AS n FROM request_log WHERE path LIKE ?", ("/api/ops%",)).fetchone()["n"]
+    check("v6 ops: ops requests are never written to the request log", n_ops == 0, str(n_ops))
+    relax(key)
+
+
+# ------------------------------------------------------- endpoint shapes ---
+@_audit("v6 ops shapes")
+def _():
+    s = _og("/api/ops/v1/summary").json()
+    check("v6 ops /summary top-level keys",
+          {"generated_at", "version", "totals", "today", "ai_by_slot", "clients", "health"} <= set(s), str(sorted(s)))
+    check("v6 ops /summary totals keys",
+          set(s["totals"]) == {"users", "devices_active", "devices_revoked", "meals", "workouts", "weights",
+                               "push_subs", "keepers"} and all(isinstance(v, int) for v in s["totals"].values()),
+          str(s["totals"]))
+    check("v6 ops /summary today keys",
+          set(s["today"]) == {"new_users", "active_users", "meals", "ai_calls", "ai_errors", "cap_hits",
+                              "requests", "errors_5xx"}, str(sorted(s["today"])))
+    slot_keys = {"calls", "errors", "p50_ms", "p95_ms", "tokens_in", "tokens_out", "model"}
+    check("v6 ops /summary ai_by_slot: every slot with calls/errors/p50/p95/tokens/model",
+          set(s["ai_by_slot"]) >= set(_usage.SLOTS) and all(set(v) == slot_keys for v in s["ai_by_slot"].values())
+          and s["ai_by_slot"]["analyze"]["calls"] >= 3 and s["ai_by_slot"]["analyze"]["tokens_in"] >= 222
+          and isinstance(s["ai_by_slot"]["analyze"]["p95_ms"], int), str(s["ai_by_slot"].get("analyze")))
+    with db.cursor() as cur:
+        users_n = cur.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
+        keepers_n = cur.execute("SELECT COUNT(*) AS n FROM users WHERE is_admin=1").fetchone()["n"]
+    check("v6 ops /summary totals match the DB", s["totals"]["users"] == users_n
+          and s["totals"]["keepers"] == keepers_n, f"{s['totals']['users']} vs {users_n}")
+    check("v6 ops /summary clients + health",
+          {"apk", "pwa", "web"} <= set(s["clients"]) and s["clients"]["web"] >= 1
+          and set(s["health"]) == {"db_ok", "nim_configured", "push_configured"} and s["health"]["db_ok"] is True,
+          f"{s['clients']} {s['health']}")
+    check("v6 ops /summary ai_by_slot.model is the configured model per slot (passthrough = chat)",
+          all(s["ai_by_slot"][sl]["model"] == backends.slot_config(sl)["model"] for sl in backends.TASKS)
+          and s["ai_by_slot"]["passthrough"]["model"] == backends.slot_config("chat")["model"],
+          str({k: v.get("model") for k, v in s["ai_by_slot"].items()}))
+    cv = s.get("client_versions", {})
+    check("v6 ops /summary client_versions: per-kind version counts that add up to clients",
+          set(cv) == set(s["clients"]) and all(sum(cv[k].values()) == s["clients"][k] for k in cv),
+          f"{cv} vs {s['clients']}")
+    td = s.get("top_dishes")
+    check("v6 ops /summary top_dishes: [{name, count}] most-logged first, at most 10",
+          isinstance(td, list) and len(td) <= 10 and all(set(d) == {"name", "count"} for d in td)
+          and all(td[i]["count"] >= td[i + 1]["count"] for i in range(len(td) - 1)) and len(td) >= 1,
+          str(td[:3] if isinstance(td, list) else td))
+
+    t = _og("/api/ops/v1/timeseries").json()
+    check("v6 ops /timeseries default 30 days ending today (SEKISHO_TZ), every series aligned",
+          len(t["days"]) == 30 and t["days"][-1] == _today_ist().isoformat()
+          and set(t["series"]) == set(_ops.SERIES_KEYS)
+          and all(len(v) == 30 and all(isinstance(x, int) for x in v) for v in t["series"].values()),
+          f"{len(t['days'])} {t['days'][-1]} {sorted(t['series'])[:3]}")
+
+    # WAU/MAU = distinct users over the trailing 7 / 30 days. Measured as a delta:
+    # one synthetic user active exactly 10 days ago counts toward MAU today, not
+    # WAU today, and toward WAU only on the 7 days starting with that visit.
+    from datetime import timedelta as _td
+    ghost, ten_ago = 990001, (_today_ist() - _td(days=10)).isoformat()
+    with db.cursor() as cur:
+        cur.execute("INSERT INTO user_active_days (user_id, day) VALUES (?, ?)", (ghost, ten_ago))
+    t2 = _og("/api/ops/v1/timeseries").json()
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM user_active_days WHERE user_id=?", (ghost,))
+    d = {k: [b - a for a, b in zip(t["series"][k], t2["series"][k])] for k in ("dau", "wau", "mau")}
+    i10 = t["days"].index(ten_ago)
+    want_wau = [1 if i10 <= i < i10 + 7 else 0 for i in range(30)]
+    want_mau = [1 if i >= i10 else 0 for i in range(30)]
+    want_dau = [1 if i == i10 else 0 for i in range(30)]
+    check("v6 ops /timeseries WAU/MAU trailing windows (7 / 30 days) and DAU single day",
+          d["wau"] == want_wau and d["mau"] == want_mau and d["dau"] == want_dau,
+          f"wau={d['wau']} mau={d['mau']} dau={d['dau']} (visit at index {i10})")
+    t7 = _og("/api/ops/v1/timeseries?days=7").json()
+    bad = _og("/api/ops/v1/timeseries?days=abc")
+    t0 = _og("/api/ops/v1/timeseries?days=0").json()
+    check("v6 ops /timeseries ?days=7 / clamps 0->1 / non-integer -> 400",
+          len(t7["days"]) == 7 and len(t0["days"]) == 1 and bad.status_code == 400, str(bad.status_code))
+    check("v6 ops /timeseries today's requests/dau are live",
+          t["series"]["requests"][-1] >= 1 and t["series"]["dau"][-1] >= 1 and t["series"]["p95_ms"][-1] > 0,
+          f"req={t['series']['requests'][-1]} dau={t['series']['dau'][-1]}")
+
+    rt = _og("/api/ops/v1/retention").json()
+    mondays_ok = all(_date6.fromisoformat(c["week_start"]).weekday() == 0 for c in rt["cohorts"])
+    check("v6 ops /retention: 8 weekly cohorts (Mondays), active + retention_pct for weeks 1..8",
+          rt["weeks"] == 8 and len(rt["cohorts"]) == 8 and mondays_ok
+          and all({"week_start", "size", "active", "retention_pct"} <= set(c) and len(c["active"]) == 8
+                  and len(c["retention_pct"]) == 8 for c in rt["cohorts"])
+          and all(x is None for x in rt["cohorts"][-1]["retention_pct"]), str(rt["cohorts"][-1]))
+
+    f = _og("/api/ops/v1/funnel").json()
+    check("v6 ops /funnel keys", set(f) == {"paired_devices", "registered_users", "first_meal",
+                                            "active_3_days", "active_7_days"}
+          and f["registered_users"] == users_n and f["paired_devices"] >= f["active_3_days"] >= 0, str(f))
+
+    u = _og("/api/ops/v1/users").json()
+    ukeys = {"id", "username", "created_at", "last_active", "meals", "streak_current", "client_kind",
+             "is_admin", "locked", "lock_state", "ai_calls_7d"}
+    check("v6 ops /users: {users:[...], total} with the spec's per-user keys",
+          u["total"] == users_n and len(u["users"]) == min(50, users_n)
+          and all(ukeys == set(x) for x in u["users"]), str(sorted(u["users"][0]) if u["users"] else u))
+    q = _og("/api/ops/v1/users?q=opsclient").json()
+    qc = q["users"][0] if q["users"] else {}
+    check("v6 ops /users?q= filters + client_kind/last_active populated",
+          q["total"] == 1 and qc.get("username") == "opsclient" and qc.get("client_kind") == "web"
+          and qc.get("last_active") == _today_ist().isoformat(), str(q))
+    pct = _og("/api/ops/v1/users?q=%25").json()
+    check("v6 ops /users?q=% is a literal match (LIKE wildcards escaped)", pct["total"] == 0, str(pct["total"]))
+    p1 = _og("/api/ops/v1/users?per_page=2&page=1&sort=username").json()
+    p2 = _og("/api/ops/v1/users?per_page=2&page=2&sort=username").json()
+    names = [x["username"] for x in p1["users"] + p2["users"]]
+    rev = _og("/api/ops/v1/users?per_page=3&sort=-username").json()
+    check("v6 ops /users paging + sort=username / -username",
+          len(p1["users"]) == 2 and len(p2["users"]) == 2 and names == sorted(names)
+          and [x["username"] for x in rev["users"]] == sorted([x["username"] for x in rev["users"]], reverse=True),
+          str(names))
+    srt = {k: _og(f"/api/ops/v1/users?sort={k}").status_code
+           for k in ("created_at", "last_active", "meals", "ai_calls_7d", "id", "-meals")}
+    bs = _og("/api/ops/v1/users?sort=password")
+    check("v6 ops /users every sort works; unknown sort -> 400",
+          set(srt.values()) == {200} and bs.status_code == 400, f"{srt} {bs.status_code}")
+    llm_user = _og("/api/ops/v1/users?q=opsllm").json()["users"][0]
+    check("v6 ops /users ai_calls_7d counts the user's llm_calls", llm_user["ai_calls_7d"] >= 5,
+          str(llm_user["ai_calls_7d"]))
+
+    uid = llm_user["id"]
+    d = _og(f"/api/ops/v1/users/{uid}").json()
+    check("v6 ops /users/{id}: profile, targets, body fat, meals, weights, workouts, devices, auth, AI usage",
+          {"user", "profile", "targets", "body_fat", "meals", "weights", "workouts", "devices", "auth",
+           "ai_usage_30d", "last_active"} <= set(d) and d["user"]["username"] == "opsllm"
+          and d["targets"] is not None and len(d["meals"]) <= 30
+          and set(d["auth"]) >= {"failed_logins", "locked", "lock_state"}
+          and d["ai_usage_30d"]["analyze"]["calls"] >= 3 and d["ai_usage_30d"]["chat"]["tokens_in"] >= 111,
+          str(sorted(d)))
+    cd = _og(f"/api/ops/v1/users/{_og('/api/ops/v1/users?q=opsclient').json()['users'][0]['id']}").json()
+    check("v6 ops /users/{id} devices carry client kind/version, last seen, revoked",
+          cd["devices"] and {"device_id", "client_kind", "client_version", "last_seen", "revoked"} <= set(cd["devices"][0])
+          and cd["devices"][0]["client_kind"] == "web" and cd["devices"][0]["revoked"] is False, str(cd["devices"]))
+    nf = _og("/api/ops/v1/users/999999")
+    check("v6 ops /users/{id} unknown -> 404 not_found envelope",
+          nf.status_code == 404 and nf.json()["error"]["code"] == "not_found", str(nf.status_code))
+
+    rq = _og("/api/ops/v1/requests").json()
+    rkeys = {"id", "at", "method", "path", "status", "duration_ms", "device_id", "device_name", "user_id", "username"}
+    check("v6 ops /requests rows (request-log columns only)",
+          rq["requests"] and all(set(x) == rkeys for x in rq["requests"]) and len(rq["requests"]) <= 200,
+          str(sorted(rq["requests"][0]) if rq["requests"] else rq))
+    r5 = _og("/api/ops/v1/requests?status=5xx").json()["requests"]
+    r429 = _og("/api/ops/v1/requests?status=429").json()["requests"]
+    rroute = _og("/api/ops/v1/requests?route=/api/v1/chat&limit=5").json()["requests"]
+    rbad = _og("/api/ops/v1/requests?status=teapot")
+    check("v6 ops /requests status=5xx|429 + route + limit filters, bad status -> 400",
+          r5 and all(500 <= x["status"] < 600 for x in r5) and r429 and all(x["status"] == 429 for x in r429)
+          and rroute and len(rroute) <= 5 and all("/api/v1/chat" in x["path"] for x in rroute)
+          and rbad.status_code == 400, f"5xx={len(r5)} 429={len(r429)} route={len(rroute)} bad={rbad.status_code}")
+
+
+# --------------------------------------------------------------- actions ---
+@_audit("v6 ops actions")
+def _():
+    def audit_rows():
+        return _og("/api/ops/v1/audit").json()["audit"]
+
+    # pairing_token
+    r = _op({"action": "pairing_token"})
+    pj = r.json()
+    png_ok = False
+    try:
+        png_ok = _b64_6.b64decode(pj["qr_png_base64"])[:8] == b"\x89PNG\r\n\x1a\n"
+    except Exception:  # noqa: BLE001
+        pass
+    claim = client.post("/api/v1/pair/claim", json={"token": pj.get("token", ""), "device_name": "ops-paired"})
+    check("v6 ops action pairing_token -> {token, url, qr_png_base64, expires_in}, token claimable",
+          r.status_code == 200 and pj["ok"] is True and {"token", "url", "qr_png_base64", "expires_in"} <= set(pj)
+          and png_ok and pj["expires_in"] == 300 and claim.status_code == 201, f"{r.status_code} {claim.status_code}")
+    a0 = audit_rows()[0]
+    check("v6 ops audit: pairing_token recorded (at/action/target/params_json/result), token not stored",
+          a0["action"] == "pairing_token" and a0["result"] == "ok" and a0["at"]
+          and set(a0) == {"id", "at", "action", "target", "params_json", "result"}
+          and pj["token"] not in _json4.dumps(a0), str(a0))
+    new_key = claim.json()["device_key"]
+
+    # revoke_device
+    new_did = _dev_id(new_key)
+    r = _op({"action": "revoke_device", "device_id": new_did})
+    after = _opsc.get("/api/v1/auth/me", headers=bearer(new_key))
+    a0 = audit_rows()[0]
+    check("v6 ops action revoke_device -> device key stops working; audited with target",
+          r.status_code == 200 and r.json()["revoked"] is True and after.status_code == 401
+          and after.json()["error"]["code"] == "invalid_key"
+          and a0["action"] == "revoke_device" and a0["target"] == new_did and a0["result"] == "ok", str(a0))
+    r = _op({"action": "revoke_device", "device_id": "dev_doesnotexist"})
+    a0 = audit_rows()[0]
+    check("v6 ops action revoke_device unknown -> 404 not_found, audited as error",
+          r.status_code == 404 and a0["result"] == "error:not_found", f"{r.status_code} {a0['result']}")
+
+    # grant / revoke keeper
+    key = _fresh("opskeeper", profile=_PROFILE)
+    uid = _uid_of(key)
+    r1 = _op({"action": "grant_keeper", "user_id": uid})
+    g = _acc6.is_admin(uid)
+    kp = client.get("/api/v1/keeper/overview", headers=bearer(key))
+    r2 = _op({"action": "revoke_keeper", "user_id": str(uid)})
+    acts = [(x["action"], x["target"], x["result"]) for x in audit_rows()[:2]]
+    check("v6 ops actions grant_keeper / revoke_keeper toggle is_admin (keeper API follows); audited",
+          r1.status_code == 200 and g is True and kp.status_code == 200 and r2.status_code == 200
+          and _acc6.is_admin(uid) is False
+          and acts == [("revoke_keeper", str(uid), "ok"), ("grant_keeper", str(uid), "ok")], str(acts))
+    r = _op({"action": "grant_keeper", "user_id": 99999999})
+    rb = _op({"action": "grant_keeper", "user_id": True})
+    check("v6 ops action grant_keeper: unknown user -> 404, non-int user_id -> 400 bad_params",
+          r.status_code == 404 and rb.status_code == 400 and rb.json()["error"]["code"] == "bad_params",
+          f"{r.status_code} {rb.status_code}")
+
+    # unlock_user
+    _sec.pin_apply_lock(_sec.pin_subject_user("opskeeper"), 20)
+    locked = _sec.pin_lock_remaining(_sec.pin_subject_user("opskeeper"))
+    det_locked = _og(f"/api/ops/v1/users/{uid}").json()["auth"]
+    r = _op({"action": "unlock_user", "user_id": uid})
+    a0 = audit_rows()[0]
+    check("v6 ops action unlock_user clears a hard PIN lock; audited",
+          locked == -1 and det_locked["locked"] is True and det_locked["lock_state"] == "hard"
+          and r.status_code == 200 and _sec.pin_lock_remaining(_sec.pin_subject_user("opskeeper")) == 0
+          and a0["action"] == "unlock_user" and a0["result"] == "ok", f"{locked} {r.status_code}")
+
+    # set_model
+    r = _op({"action": "set_model", "slot": "insights", "model": "meta/llama-3.1-8b-instruct",
+             "fallback": "none"})
+    sc = backends.slot_config("insights")
+    a0 = audit_rows()[0]
+    check("v6 ops action set_model sets the slot's model + fallback (DB settings); audited with params",
+          r.status_code == 200 and r.json()["config"]["model"] == "meta/llama-3.1-8b-instruct"
+          and sc["model"] == "meta/llama-3.1-8b-instruct" and sc["fallback"] is None and sc["source"] == "admin"
+          and a0["action"] == "set_model" and a0["target"] == "insights"
+          and _json4.loads(a0["params_json"]) == {"slot": "insights", "model": "meta/llama-3.1-8b-instruct",
+                                                   "fallback": "none"}, str(a0))
+    r = _op({"action": "set_model", "slot": "insights", "model": ""})
+    check("v6 ops action set_model with empty model reverts to env/default",
+          r.status_code == 200 and backends.slot_config("insights")["source"] != "admin", str(r.json()))
+    rb1 = _op({"action": "set_model", "slot": "vision", "model": "x/y"})
+    rb2 = _op({"action": "set_model", "slot": "chat", "model": "bad model id!"})
+    check("v6 ops action set_model: bad slot / bad model -> 400",
+          rb1.status_code == 400 and rb1.json()["error"]["code"] == "bad_slot"
+          and rb2.status_code == 400 and rb2.json()["error"]["code"] == "bad_model"
+          and backends.slot_config("chat")["source"] != "admin", f"{rb1.status_code} {rb2.status_code}")
+
+    # push_test (send monkeypatched) + push counters
+    sent_to = []
+    saved_send = push.send_web_push
+    try:
+        push.send_web_push = lambda sub, payload: sent_to.append((sub["endpoint"], payload["slot"]))
+        relax(key)
+        client.post("/api/v1/push/subscribe", headers=bearer(key),
+                    json={"subscription": _push_sub("opspush"), "tz_offset_min": 330})
+        ps0, pf0 = _stat_today("pushes_sent"), _stat_today("pushes_failed")
+        r = _op({"action": "push_test", "user_id": uid})
+        a0 = audit_rows()[0]
+        ok1 = (r.status_code == 200 and r.json()["ok"] is True and r.json()["sent"] == 1 and len(sent_to) == 1
+               and a0["action"] == "push_test" and a0["result"] == "ok")
+
+        def _boom(sub, payload):
+            raise RuntimeError("push service down")
+        push.send_web_push = _boom
+        r2 = _op({"action": "push_test", "user_id": uid})
+        a1 = audit_rows()[0]
+    finally:
+        push.send_web_push = saved_send
+    check("v6 ops action push_test sends to the user's subscription; audited",
+          ok1, f"{r.status_code} {r.json()}")
+    check("v6 ops action push_test failure -> ok:false, audited as failed; push counters per day",
+          r2.status_code == 200 and r2.json()["ok"] is False and a1["result"] == "failed"
+          and _stat_today("pushes_sent") == ps0 + 1 and _stat_today("pushes_failed") == pf0 + 1,
+          f"{r2.json()} sent={_stat_today('pushes_sent') - ps0} failed={_stat_today('pushes_failed') - pf0}")
+    t = _og("/api/ops/v1/timeseries?days=1").json()["series"]
+    check("v6 ops /timeseries pushes_sent / pushes_failed / cap_hits come from the daily counters",
+          t["pushes_sent"][-1] == _stat_today("pushes_sent") and t["pushes_failed"][-1] == _stat_today("pushes_failed")
+          and t["cap_hits"][-1] == _stat_today("cap_hits") >= 1, str({k: t[k] for k in ("pushes_sent", "cap_hits")}))
+
+    # unknown / malformed
+    r = _op({"action": "drop_database"})
+    a0 = audit_rows()[0]
+    rj = _opsc.post("/api/ops/v1/actions", headers={**_oh(), "Content-Type": "application/json"}, content=b"{nope")
+    rn = _op({"no_action": 1})
+    rl = _op([1, 2])
+    _OPS_RESPONSES.append(rj)
+    check("v6 ops actions: unknown action -> 400 unknown_action (audited); bad JSON/shape -> 400",
+          r.status_code == 400 and r.json()["error"]["code"] == "unknown_action"
+          and a0["action"] == "drop_database" and a0["result"] == "error:unknown_action"
+          and rj.status_code == 400 and rn.status_code == 400 and rl.status_code == 400,
+          f"{r.status_code} {rj.status_code} {rn.status_code} {rl.status_code}")
+    au = _og("/api/ops/v1/audit?limit=3").json()["audit"]
+    check("v6 ops /audit?limit=3 newest first", len(au) == 3 and au[0]["id"] > au[1]["id"] > au[2]["id"],
+          str([x["id"] for x in au]))
+    relax(key)
+
+
+# ------------------------------------------------- timeseries math (seed) --
+@_audit("v6 ops timeseries math")
+def _():
+    D = _today_ist() - _td6(days=3)
+    Ds, Dm1, Dp1 = D.isoformat(), (D - _td6(days=1)).isoformat(), (D + _td6(days=1)).isoformat()
+    start_D = _ist_midnight(D)              # = (D-1) 18:30Z
+    start_Dp1 = _ist_midnight(D + _td6(days=1))
+    sec = _td6(seconds=1)
+
+    def series():
+        t = _og("/api/ops/v1/timeseries?days=10").json()
+        return t["days"], t["series"]
+
+    days0, s0 = series()
+    before_p95 = s0["p95_ms"][days0.index(Ds)]
+
+    seed_u = _ins_user("seed_ts", _z(start_D))                # first second of D -> new user on D
+    seed_u2 = _ins_user("seed_ts2", _z(start_D - sec))        # last second of D-1
+    _ins_meal(seed_u, _z(start_D - sec), "manual")            # D-1
+    _ins_meal(seed_u, _z(start_D), "photo")                   # D
+    _ins_meal(seed_u, (start_D + _td6(hours=6)).astimezone(_UTC6).isoformat(), "barcode")  # +00:00 form
+    _ins_meal(seed_u, _z(start_D + _td6(hours=7)), "quicklog")
+    _ins_meal(seed_u, _z(start_D + _td6(hours=8)), "suggestion")
+    _ins_meal(seed_u, (start_Dp1 - _td6(microseconds=1)).astimezone(_UTC6).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+              "chat")                                          # D, last microsecond
+    _ins_meal(seed_u, _z(start_Dp1), "chat")                  # D+1
+    _ins_llm(seed_u, _z(start_D + _td6(hours=1)), "analyze", True, 100, 10)
+    _ins_llm(seed_u, _z(start_D + _td6(hours=2)), "chat", True, 50, 5)
+    _ins_llm(seed_u, _z(start_D + _td6(hours=3)), "chat", False)
+    _ins_llm(seed_u, _z(start_D - _td6(minutes=1)), "chat", True, 1, 1)   # D-1
+    _ins_active(seed_u, Ds)
+    _ins_active(seed_u2, Ds)
+    _usage.bump_stats({"requests": 100, "errors_5xx": 3, "cap_hits": 2, "pushes_sent": 4, "pushes_failed": 1,
+                       "lat_le_100": 94, "lat_le_1000": 6},
+                      now=start_D + _td6(hours=12))
+
+    days1, s1 = series()
+    i, im1, ip1 = days1.index(Ds), days1.index(Dm1), days1.index(Dp1)
+    j, jm1, jp1 = days0.index(Ds), days0.index(Dm1), days0.index(Dp1)
+
+    def delta(k, a, b):
+        return s1[k][a] - s0[k][b]
+
+    exp_D = {"new_users": 1, "dau": 2, "meals": 5, "meals_photo": 1, "meals_barcode": 1, "meals_quicklog": 2,
+             "meals_chat": 1, "meals_manual": 0, "ai_calls": 3, "ai_errors": 1, "ai_tokens_in": 150,
+             "ai_tokens_out": 15, "requests": 100, "errors_5xx": 3, "cap_hits": 2, "pushes_sent": 4,
+             "pushes_failed": 1}
+    got_D = {k: delta(k, i, j) for k in exp_D}
+    check("v6 ops /timeseries seeded day D: every series counts exactly what was seeded",
+          got_D == exp_D, str({k: (got_D[k], exp_D[k]) for k in exp_D if got_D[k] != exp_D[k]}))
+    exp_m1 = {"new_users": 1, "meals": 1, "meals_manual": 1, "ai_calls": 1, "meals_photo": 0}
+    exp_p1 = {"meals": 1, "meals_chat": 1, "new_users": 0}
+    got_m1 = {k: delta(k, im1, jm1) for k in exp_m1}
+    got_p1 = {k: delta(k, ip1, jp1) for k in exp_p1}
+    check("v6 ops /timeseries day boundaries follow SEKISHO_TZ midnight (18:30Z), both sides",
+          got_m1 == exp_m1 and got_p1 == exp_p1, f"D-1 {got_m1} D+1 {got_p1}")
+    check("v6 ops /timeseries p95_ms from the day's latency histogram",
+          before_p95 == 0 and s1["p95_ms"][i] == 1000, f"{before_p95} -> {s1['p95_ms'][i]}")
+
+    # Independent recompute of meals / new_users / ai_calls for all 10 days from
+    # the raw rows, bucketed in Python with the fixed +05:30 offset.
+    dt = __import__("datetime").datetime
+
+    def _day_of(ts: str) -> str:
+        v = dt.fromisoformat(ts)
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=_UTC6)
+        return v.astimezone(_IST).date().isoformat()
+    with db.cursor() as cur:
+        raw = {
+            "meals": [r["t"] for r in cur.execute("SELECT eaten_at AS t FROM meals").fetchall()],
+            "new_users": [r["t"] for r in cur.execute("SELECT created_at AS t FROM users").fetchall()],
+            "ai_calls": [r["t"] for r in cur.execute("SELECT at AS t FROM llm_calls").fetchall()],
+        }
+    mism = {}
+    for k, ts in raw.items():
+        want = [0] * len(days1)
+        pos = {d: n for n, d in enumerate(days1)}
+        for t in ts:
+            dd = _day_of(t)
+            if dd in pos:
+                want[pos[dd]] += 1
+        if want != s1[k]:
+            mism[k] = (want, s1[k])
+    check("v6 ops /timeseries matches an independent Python recompute (meals, new_users, ai_calls)",
+          not mism, str(mism)[:300])
+
+
+# -------------------------------------------------- retention math (seed) --
+@_audit("v6 ops retention math")
+def _():
+    weeks = 8
+    today = _today_ist()
+    this_monday = today - _td6(days=today.weekday())
+    c_monday = this_monday - _td6(weeks=3)                     # cohort index 4 of 8
+    i_c = weeks - 1 - 3
+    r0 = _og(f"/api/ops/v1/retention?weeks={weeks}").json()["cohorts"]
+
+    start_c = _ist_midnight(c_monday)
+    ua = _ins_user("seed_ret_a", _z(start_c + _td6(days=1, hours=4)))
+    ub = _ins_user("seed_ret_b", _z(start_c + _td6(days=2)))
+    uc = _ins_user("seed_ret_c", _z(start_c))                          # Monday 00:00 IST -> this cohort
+    ud = _ins_user("seed_ret_d", _z(start_c - _td6(seconds=1)))        # Sunday 23:59:59 IST -> previous
+    wk = lambda n, dd=0: (c_monday + _td6(weeks=n, days=dd)).isoformat()  # noqa: E731
+    for u in (ua, ub, uc):
+        _ins_active(u, wk(0, 1))            # signup week (week 0) - not part of weeks 1..N
+    _ins_active(ua, wk(1, 2))
+    _ins_active(ua, wk(1, 5))               # twice in week 1 -> still counted once
+    _ins_active(ub, wk(1, 6))               # Sunday of week 1
+    _ins_active(ua, wk(2, 0))               # Monday of week 2
+    _ins_active(ud, wk(1, 0))               # previous cohort, its week 2
+
+    r1 = _og(f"/api/ops/v1/retention?weeks={weeks}").json()["cohorts"]
+    c0, c1 = r0[i_c], r1[i_c]
+    p0, p1 = r0[i_c - 1], r1[i_c - 1]
+    d_active = [(b - a) if b is not None else None for a, b in zip(c0["active"], c1["active"])]
+    check("v6 ops /retention: cohort sizes split exactly at Monday 00:00 SEKISHO_TZ",
+          c1["week_start"] == c_monday.isoformat() and c1["size"] - c0["size"] == 3
+          and p1["size"] - p0["size"] == 1, f"{c1['size'] - c0['size']} / {p1['size'] - p0['size']}")
+    check("v6 ops /retention: weeks 1..N active counts (distinct users per week), future weeks null",
+          d_active == [2, 1, 0, None, None, None, None, None], str(d_active))
+    if c0["size"] == 0:
+        check("v6 ops /retention: % active = active / cohort size",
+              c1["retention_pct"][:3] == [round(200 / 3, 1), round(100 / 3, 1), 0.0], str(c1["retention_pct"]))
+    pd = [(b - a) if b is not None else None for a, b in zip(p0["active"], p1["active"])]
+    check("v6 ops /retention: activity lands in the right week offset for the previous cohort",
+          pd[:2] == [0, 1], str(pd))
+    rbad = _og("/api/ops/v1/retention?weeks=x")
+    r3 = _og("/api/ops/v1/retention?weeks=3").json()
+    check("v6 ops /retention ?weeks=3 / bad -> 400", r3["weeks"] == 3 and len(r3["cohorts"]) == 3
+          and rbad.status_code == 400, str(rbad.status_code))
+
+
+# ---------------------------------------------------- funnel math (seed) ---
+@_audit("v6 ops funnel math")
+def _():
+    f0 = _og("/api/ops/v1/funnel").json()
+    today = _today_ist()
+    ue = _ins_user("seed_fun_e", _z(__import__("datetime").datetime.now(_UTC6)))
+    uf = _ins_user("seed_fun_f", _z(__import__("datetime").datetime.now(_UTC6)))
+    _ins_meal(ue, _z(__import__("datetime").datetime.now(_UTC6)), "manual")
+    _ins_meal(ue, _z(__import__("datetime").datetime.now(_UTC6)), "photo")
+    for k in range(3):
+        _ins_active(ue, (today - _td6(days=40 + k)).isoformat())
+    for k in range(7):
+        _ins_active(uf, (today - _td6(days=40 + k)).isoformat())
+    pair_device("funnel-phone")
+    f1 = _og("/api/ops/v1/funnel").json()
+    d = {k: f1[k] - f0[k] for k in f0}
+    check("v6 ops /funnel math on seeded users (devices, users, first meal, 3-day, 7-day)",
+          d == {"paired_devices": 1, "registered_users": 2, "first_meal": 1, "active_3_days": 2,
+                "active_7_days": 1}, str(d))
+
+
+# ------------------------------------------------ ops rate limit / tokens --
+@_audit("v6 ops rate limit")
+def _():
+    saved = _ops._ops_limiter._limit
+    try:
+        _ops._ops_limiter._limit = 3
+        _sec.reset_counters("rl:ops:")
+        codes = [_og("/api/ops/v1/funnel").status_code for _ in range(4)]
+        dev_ok = client.get("/api/v1/health").status_code
+    finally:
+        _ops._ops_limiter._limit = saved
+        _sec.reset_counters("rl:ops:")
+    check("v6 ops: own rate limit (429 past it), independent of the per-device limiter",
+          codes == [200, 200, 200, 429] and dev_ok == 200 and saved >= 100, f"{codes} limit={saved}")
+
+
+@_audit("v6 ops migrations")
+def _():
+    import sqlite3 as _sql6
+    db.migrate()
+    db.migrate()
+    with db.cursor() as cur:
+        have = {t: db._table_exists(cur, t) for t in ("llm_calls", "user_active_days", "daily_stats", "ops_audit")}
+        dcols = db._columns(cur, "devices")
+    check("v6 migrate(): idempotent, new tables + device columns present",
+          all(have.values()) and {"client_kind", "client_version"} <= dcols and db.SCHEMA_VERSION == "6",
+          str(have))
+    mp = Path(tempfile.mkdtemp(prefix="sekisho_v5_")) / "v5.db"
+    c = _sql6.connect(str(mp))
+    c.executescript(
+        "CREATE TABLE devices (device_id TEXT PRIMARY KEY, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, "
+        "created_at TEXT NOT NULL, last_seen TEXT, req_count INTEGER NOT NULL DEFAULT 0, "
+        "revoked INTEGER NOT NULL DEFAULT 0, active_user_id INTEGER);"
+        "INSERT INTO devices VALUES ('dev_v5','p','h5','2026-01-01T00:00:00',NULL,0,0,NULL);"
+        "CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, "
+        "pin_hash TEXT NOT NULL, pin_salt TEXT NOT NULL, created_at TEXT NOT NULL, "
+        "failed_count INTEGER NOT NULL DEFAULT 0, lock_until TEXT, is_admin INTEGER NOT NULL DEFAULT 0);"
+    )
+    c.commit()
+    c.close()
+    saved = db._backend
+    try:
+        db._backend = None
+        db.init_db(mp)
+        db.migrate()
+        with db.cursor() as cur:
+            cols = db._columns(cur, "devices")
+            row = cur.execute("SELECT device_id, client_kind FROM devices").fetchone()
+            tabs = all(db._table_exists(cur, t) for t in ("llm_calls", "user_active_days", "daily_stats",
+                                                          "ops_audit"))
+        check("v6 migrate(): a v5 SQLite DB upgrades in place (columns added, rows kept), twice",
+              {"client_kind", "client_version"} <= cols and row["device_id"] == "dev_v5"
+              and row["client_kind"] is None and tabs, str(sorted(cols)))
+    finally:
+        db.close_db()
+        db._backend = saved
+    ddl = "\n".join(db.pg_schema_statements())
+    check("v6 Postgres DDL: identity ids for llm_calls/ops_audit, BIGINT counters, no AUTOINCREMENT",
+          "AUTOINCREMENT" not in ddl and ddl.count("GENERATED BY DEFAULT AS IDENTITY") >= 9
+          and "llm_calls" in db.IDENTITY_TABLES and "ops_audit" in db.IDENTITY_TABLES
+          and "ALTER TABLE devices ADD COLUMN client_kind TEXT" in _insp6.getsource(db._ensure_columns), "")
+    src = _insp6.getsource(_ops) + _insp6.getsource(_usage)
+    dialect = [w for w in ("julianday", "date_trunc", "to_char(", "INTERVAL ", "::", "datetime('", "date('",
+                           "strftime('", "NOW()", "CURRENT_DATE") if w in src]
+    check("v6 ops SQL is dialect-neutral (no SQLite/Postgres-only date functions)", not dialect, str(dialect))
+
+
+@_audit("v6 ops token never leaks")
+def _():
+    leaks = [f"{r.request.method} {r.request.url.path}" for r in _OPS_RESPONSES
+             if _OPS_TOKEN in r.text or _OPS_TOKEN in str(dict(r.headers))]
+    with db.cursor() as cur:
+        blobs = _json4.dumps([dict(x) for x in cur.execute("SELECT * FROM ops_audit").fetchall()]
+                             + [dict(x) for x in cur.execute("SELECT * FROM request_log").fetchall()]
+                             + [dict(x) for x in cur.execute("SELECT * FROM settings").fetchall()])
+    check(f"v6 ops: the ops token never appears in any response ({len(_OPS_RESPONSES)} checked) or the DB",
+          len(_OPS_RESPONSES) > 40 and not leaks and _OPS_TOKEN not in blobs, str(leaks[:3]))
+    check("v6 ops: config repr never shows the ops token", _OPS_TOKEN not in repr(config), "")
+
+
 # ---------------------------------------------------------------------------
 # report
 # ---------------------------------------------------------------------------

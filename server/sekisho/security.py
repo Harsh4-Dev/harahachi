@@ -236,10 +236,12 @@ def purge_expired_tokens() -> None:
         cur.execute("DELETE FROM pairing_tokens WHERE expires_at < ? OR used=1", (now,))
 
 
-def resolve_device(key: str) -> dict | None:
+def resolve_device(key: str, client: tuple[str, str] | None = None) -> dict | None:
     """Return device row dict for a bearer key, or None if invalid/revoked.
 
     Includes ``active_user_id`` (the logged-in user for this device, or None).
+    ``client`` = validated (kind, version) from X-Harahachi-Client; stored in the
+    same UPDATE that bumps last_seen (no extra write).
     """
     key_hash = hash_key(key)
     with db.cursor() as cur:
@@ -249,10 +251,17 @@ def resolve_device(key: str) -> dict | None:
         ).fetchone()
         if row is None or row["revoked"]:
             return None
-        cur.execute(
-            "UPDATE devices SET last_seen=?, req_count=req_count+1 WHERE device_id=?",
-            (now_iso(), row["device_id"]),
-        )
+        if client is not None:
+            cur.execute(
+                "UPDATE devices SET last_seen=?, req_count=req_count+1, client_kind=?, "
+                "client_version=? WHERE device_id=?",
+                (now_iso(), client[0], client[1], row["device_id"]),
+            )
+        else:
+            cur.execute(
+                "UPDATE devices SET last_seen=?, req_count=req_count+1 WHERE device_id=?",
+                (now_iso(), row["device_id"]),
+            )
         return {
             "device_id": row["device_id"],
             "name": row["name"],

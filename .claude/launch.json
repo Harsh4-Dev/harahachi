@@ -6,6 +6,18 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["--prefix", "app", "run", "dev"],
       "port": 5173
+    },
+    {
+      "name": "bansho-console-api",
+      "runtimeExecutable": "C:/Users/harsh/AppData/Local/Temp/bansho-venv/Scripts/python.exe",
+      "runtimeArgs": ["D:/linux_workspace/bansho/console/backend/dev_server.py"],
+      "port": 8787
+    },
+    {
+      "name": "bansho-console",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "D:/linux_workspace/bansho/console", "run", "dev"],
+      "port": 5173
     }
   ]
 }
