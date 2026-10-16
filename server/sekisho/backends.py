@@ -14,7 +14,9 @@ This module replaces the old single-URL ``vllm_client`` internals. It exposes:
 v4 adds a second provider mode, **NVIDIA NIM** (the only provider on Vercel):
 per-task model slots (analyze / body / chat / insights) resolved DB setting >
 env ``NIM_MODEL_<TASK>`` > default, each with an optional fallback model tried
-once. The key comes from ``NVIDIA_API_KEY`` only — never stored, never returned.
+once. v7: the key comes from env ``NVIDIA_API_KEY`` (wins) or from the admin's
+Backends tab, stored Fernet-encrypted (vault.py) — never returned, logged or
+echoed in an error (``scrub``); the admin only sees a masked hint.
 Every outbound base URL passes ``check_backend_url`` (https allowlist on Vercel)
 and every request is bounded by one deadline (``SEKISHO_LLM_BUDGET``).
 """
@@ -167,7 +169,83 @@ def _cfg():
 
 
 def provider_mode() -> str:
-    return _cfg().provider_mode()
+    """config.provider_mode(), but the auto mode also counts a key stored from the admin."""
+    c = _cfg()
+    if c.provider in ("nim", "registry"):
+        return c.provider
+    return "nim" if (c.on_vercel or nvidia_key()) else "registry"
+
+
+# ---------------------------------------------------------------------------
+# NVIDIA API key resolution (v7): env NVIDIA_API_KEY wins, else the key the
+# owner stored from the admin (Fernet-encrypted in settings, see vault.py).
+# The value is only ever used as an outbound Authorization header.
+# ---------------------------------------------------------------------------
+NVIDIA_KEY_SECRET = "nvidia_api_key"
+_KEY_RE = re.compile(r"^[\x21-\x7e]{16,256}$")  # printable ASCII, no spaces
+
+
+class KeyStoreError(ValueError):
+    def __init__(self, code: str, message: str, status: int = 400):
+        super().__init__(code)
+        self.code, self.message, self.status = code, message, status
+
+
+def _stored_nvidia_key() -> str | None:
+    from . import vault
+    return vault.get(NVIDIA_KEY_SECRET)
+
+
+def nvidia_key() -> str:
+    """The effective NVIDIA API key ('' when none is configured)."""
+    return _cfg().nvidia_api_key or _stored_nvidia_key() or ""
+
+
+def nvidia_key_source() -> str | None:
+    if _cfg().nvidia_api_key:
+        return "env"
+    return "admin" if _stored_nvidia_key() else None
+
+
+def nim_key_status() -> dict:
+    """What the admin may know about the key: never the key, only a masked hint."""
+    from . import vault
+    c = _cfg()
+    stored_state = vault.state(NVIDIA_KEY_SECRET)
+    return {
+        "configured": bool(nvidia_key()),
+        "source": nvidia_key_source(),
+        "hint": mask_key(nvidia_key()),
+        "env_locked": bool(c.nvidia_api_key),
+        "env_label": "Vercel environment" if c.on_vercel else "server environment",
+        "storage_available": vault.available(),
+        "storage_message": vault.problem() or "",
+        "stored_state": stored_state,
+    }
+
+
+def set_stored_nvidia_key(value: str) -> dict:
+    """Admin: store/replace the NVIDIA key (encrypted). Errors never echo the value."""
+    from . import vault
+    if _cfg().nvidia_api_key:
+        raise KeyStoreError("env_locked", "NVIDIA_API_KEY is set in the deployment environment, which "
+                            "takes precedence. Change it there (or remove it) instead.", 409)
+    if not vault.available():
+        raise KeyStoreError("secrets_key_missing", vault.problem() or "secret storage unavailable", 503)
+    value = (value or "").strip()
+    if not _KEY_RE.match(value):
+        raise KeyStoreError("bad_key", "That does not look like an API key: expected 16-256 printable "
+                            "characters without spaces.")
+    vault.put(NVIDIA_KEY_SECRET, value)
+    _health_cache.update(at=0.0, value=(False, None))
+    return nim_key_status()
+
+
+def clear_stored_nvidia_key() -> dict:
+    from . import vault
+    vault.delete(NVIDIA_KEY_SECRET)
+    _health_cache.update(at=0.0, value=(False, None))
+    return nim_key_status()
 
 
 def nim_mode() -> bool:
@@ -244,21 +322,23 @@ def mask_key(key: str | None) -> str | None:
 
 def scrub(text: str) -> str:
     """Remove any secret that might be echoed back in an upstream error."""
-    key = _cfg().nvidia_api_key
     out = str(text)
-    if key:
-        out = out.replace(key, "***")
+    for key in {_cfg().nvidia_api_key, _stored_nvidia_key()}:
+        if key:
+            out = out.replace(key, "***")
     return out
 
 
 def nim_payload() -> dict:
     """Admin view of the NIM provider. The key is NEVER included — only a mask."""
     c = _cfg()
+    key = nim_key_status()
     return {
         "provider": provider_mode(),
         "base_url": c.nim_base_url,
-        "key_configured": bool(c.nvidia_api_key),
-        "key_hint": mask_key(c.nvidia_api_key),
+        "key_configured": key["configured"],
+        "key_hint": key["hint"],
+        "key": key,
         "allowlist": c.backend_allowlist,
         "allowlist_enforced": c.enforce_backend_allowlist,
         "max_image_b64": c.nim_max_image_b64,
@@ -502,7 +582,7 @@ def _candidate_chain(need_vision: bool) -> list[dict]:
 
 def is_configured(need_vision: bool = False) -> bool:
     if nim_mode():
-        return bool(_cfg().nvidia_api_key)
+        return bool(nvidia_key())
     return bool(_candidate_chain(need_vision))
 
 
@@ -513,13 +593,13 @@ def _nim_summary_entry(task: str) -> dict:
     c = _cfg()
     s = slot_config(task)
     return {"id": None, "name": "NVIDIA NIM", "kind": "nvidia", "base_url": c.nim_base_url,
-            "has_key": bool(c.nvidia_api_key), "model": s["model"],
-            "vision": task in VISION_TASKS, "enabled": bool(c.nvidia_api_key)}
+            "has_key": bool(nvidia_key()), "model": s["model"],
+            "vision": task in VISION_TASKS, "enabled": bool(nvidia_key())}
 
 
 def active_summary() -> dict:
     if nim_mode():
-        on = 1 if _cfg().nvidia_api_key else 0
+        on = 1 if nvidia_key() else 0
         return {"text": _nim_summary_entry("chat"), "vision": _nim_summary_entry("analyze"),
                 "count": 1, "enabled_count": on, "provider": "nim"}
     text_id = _active_id(False)
@@ -537,7 +617,7 @@ def active_summary() -> dict:
 
 def active_text_model() -> str | None:
     if nim_mode():
-        return slot_config("chat")["model"] if _cfg().nvidia_api_key else None
+        return slot_config("chat")["model"] if nvidia_key() else None
     bid = _active_id(False)
     b = _get_backend_full(bid) if bid else None
     return b["model"] if b else None
@@ -622,14 +702,13 @@ async def _one_completion(backend: dict, messages: list[dict], max_tokens: int, 
 
 def _nim_backend(model: str) -> dict:
     c = _cfg()
-    return {"base_url": c.nim_base_url, "api_key": c.nvidia_api_key, "model": model}
+    return {"base_url": c.nim_base_url, "api_key": nvidia_key(), "model": model}
 
 
 async def _nim_completion(task: str, messages: list[dict], max_tokens: int, temperature: float,
                           op: str, deadline: float) -> str:
-    c = _cfg()
-    if not c.nvidia_api_key:
-        raise BackendUnavailable("NVIDIA_API_KEY is not set")
+    if not nvidia_key():
+        raise BackendUnavailable("no NVIDIA API key (set NVIDIA_API_KEY or store one in the admin)")
     s = slot_config(task)
     models = [s["model"]] + ([s["fallback"]] if s["fallback"] else [])
     last_err: Exception | None = None
@@ -747,7 +826,7 @@ async def phrase_suggestions(remaining: dict, candidates: list[dict]) -> list[di
 # ---------------------------------------------------------------------------
 def _active_text_backend_full() -> dict | None:
     if nim_mode():
-        if not _cfg().nvidia_api_key:
+        if not nvidia_key():
             return None
         return _nim_backend(slot_config("chat")["model"])
     bid = _active_id(False)
@@ -877,8 +956,8 @@ async def test_nim_slot(task: str) -> dict:
     """1-token ping of a NIM slot's primary model (spends ~1 token of credit)."""
     if task not in TASKS:
         return {"ok": False, "error": "unknown task"}
-    if not _cfg().nvidia_api_key:
-        return {"ok": False, "error": "NVIDIA_API_KEY is not set"}
+    if not nvidia_key():
+        return {"ok": False, "error": "no NVIDIA API key (set NVIDIA_API_KEY or store one in the admin)"}
     s = slot_config(task)
     out = await _ping(_nim_backend(s["model"]))
     out["model"] = s["model"]

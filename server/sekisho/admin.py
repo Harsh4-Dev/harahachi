@@ -7,10 +7,13 @@ Glass-tab navigation over cards/pages:
   * Backends — registry CRUD (with presets), active vision/text switches, test
   * Requests — last 200 log rows, filterable client-side
   * Push     — subscription count, send a test notification
+  * Bus Board / Contributors (v7) — the second phone app's server, read and
+    managed server-to-server (busboard.py); its token never reaches the browser
 
-Endpoints (all admin-session guarded except the login/QR image):
+Endpoints (all admin-session guarded except the login + captcha):
   GET  /admin                         -> login or dashboard
-  POST /admin/login  /admin/logout
+  GET  /admin/captcha                 -> proof-of-work challenge for the login form
+  POST /admin/login  /admin/logout    (login = password + solved captcha)
   GET  /admin/api/state               -> status + devices + logs + ips + push
   POST /admin/api/pair                -> new pairing token
   GET  /admin/api/qr                  -> PNG QR for a token
@@ -28,6 +31,11 @@ Endpoints (all admin-session guarded except the login/QR image):
   GET  /admin/api/nim                 -> NIM provider + per-task model slots (key masked)
   POST /admin/api/nim/slot            -> set a slot's model/fallback (stored in DB settings)
   POST /admin/api/nim/test            -> 1-token ping of a slot's model
+  POST /admin/api/nim/key             -> store/replace the NVIDIA key (write-only, encrypted)
+  POST /admin/api/nim/key/clear       -> forget the stored key
+  GET  /admin/api/busboard            -> Bus Board stats + server-rendered panels (30 s cache)
+  POST /admin/api/busboard/contributors/{id_hash}/block|unblock   (confirm=1)
+  POST /admin/api/busboard/snapshot   (confirm=1)
 
 v4 security (serverless-safe, enforced by tests):
   * Session cookie = HMAC(SEKISHO_SESSION_SECRET) — valid on every instance.
@@ -38,8 +46,11 @@ v4 security (serverless-safe, enforced by tests):
   * Every state-changing admin request needs the session's CSRF token
     (X-CSRF-Token header, or csrf_token form field) and a same-host Origin.
   * Login lockout is DB-backed (per IP + global) so it holds across instances.
+    v7: the login also needs a solved self-hosted proof-of-work captcha
+    (captcha.py, verified before the password; a failure counts as a failed login).
   * Admin pages carry a strict CSP with a per-request nonce for the one inline
-    script. NVIDIA_API_KEY never appears in any admin response (masked hint only).
+    script. The NVIDIA key (env or stored) never appears in any admin response
+    (masked hint only); Bus Board writes are CSRF-guarded and audited (ops_audit).
 """
 from __future__ import annotations
 
@@ -57,7 +68,7 @@ import qrcode
 from fastapi import APIRouter, Form, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 
-from . import accounts, backends, db, feedback, push, security
+from . import accounts, backends, busboard, captcha, db, feedback, push, security
 from .config import config
 from .net import best_pairing_host, classify_ips, public_url
 from .models import valid_date
@@ -541,11 +552,29 @@ def _html(body: str, status: int = 200, nonce: str | None = None) -> HTMLRespons
 # Auth pages
 # ---------------------------------------------------------------------------
 def _login_page(message: str = "", status: int = 200) -> HTMLResponse:
+    nonce = secrets.token_urlsafe(16)
     reason = config.admin_login_disabled_reason()
     if reason:
-        return _html(login_html(reason, disabled=True, on_vercel=config.on_vercel),
-                     status=503 if status == 200 else status)
-    return _html(login_html(message, on_vercel=config.on_vercel), status=status)
+        return _html(login_html(reason, disabled=True, on_vercel=config.on_vercel, nonce=nonce),
+                     status=503 if status == 200 else status, nonce=nonce)
+    return _html(login_html(message, on_vercel=config.on_vercel, nonce=nonce), status=status, nonce=nonce)
+
+
+def _captcha_base_key() -> bytes | None:
+    """Root secret for the login captcha HMAC (HKDF-derived inside captcha.py,
+    with its own purpose label, so it never equals the cookie-signing key)."""
+    return _session_key()
+
+
+@router.get("/admin/captcha")
+async def admin_captcha():
+    """Issue one proof-of-work challenge for the login form (stateless, signed)."""
+    reason = config.admin_login_disabled_reason()
+    key = None if reason else _captcha_base_key()
+    if key is None:
+        return JSONResponse({"error": {"code": "login_disabled", "message": reason or "admin login disabled"}},
+                            status_code=503, headers={"Cache-Control": "no-store"})
+    return JSONResponse(captcha.issue(key), headers={"Cache-Control": "no-store"})
 
 
 @router.get("/admin", response_class=HTMLResponse)
@@ -558,17 +587,23 @@ async def admin_index(request: Request):
 
 
 @router.post("/admin/login")
-async def admin_login(request: Request, password: str = Form(...)):
+async def admin_login(request: Request, password: str = Form(...), altcha: str = Form(default="")):
+    """Password + proof-of-work captcha. Order: fail-closed config -> same origin ->
+    lockout -> captcha (a failure counts as a failed login) -> password."""
     reason = config.admin_login_disabled_reason()
     if reason:
-        return _html(login_html(reason, disabled=True, on_vercel=config.on_vercel), status=503)
+        return _login_page(reason, status=503)
     if not _same_origin(request):
-        return _html(login_html("Cross-site login blocked.", on_vercel=config.on_vercel), status=403)
+        return _login_page("Cross-site login blocked.", status=403)
     ip = security.client_ip(request)
     wait = security.admin_locked(ip)
     if wait:
-        return _html(login_html(f"Too many failed attempts. Try again in {wait // 60 + 1} min.",
-                                on_vercel=config.on_vercel), status=429)
+        return _login_page(f"Too many failed attempts. Try again in {wait // 60 + 1} min.", status=429)
+    key = _captcha_base_key()
+    problem = captcha.verify(altcha, key) if key is not None else "bad_signature"
+    if problem:
+        security.admin_login_failed(ip)
+        return _login_page(captcha.REASONS.get(problem, "Anti-bot check failed."), status=401)
     if hmac.compare_digest(password.encode("utf-8"), config.admin_password.encode("utf-8")):
         security.admin_login_succeeded(ip)
         resp = RedirectResponse("/admin", status_code=303)
@@ -577,7 +612,7 @@ async def admin_login(request: Request, password: str = Form(...)):
                         secure=config.on_vercel or _is_https(request))
         return resp
     security.admin_login_failed(ip)
-    return _html(login_html("Incorrect password.", on_vercel=config.on_vercel), status=401)
+    return _login_page("Incorrect password.", status=401)
 
 
 @router.post("/admin/logout")
@@ -944,6 +979,112 @@ async def admin_nim_test(request: Request, task: str = Form(...)):
     if guard:
         return guard
     return await backends.test_nim_slot(task)
+
+
+def _audit(action: str, target: str | None, params: dict, result: str) -> None:
+    """Admin writes share the ops API's audit trail (ops_audit, "admin." actions)."""
+    try:
+        from .ops import _audit as _ops_audit
+        _ops_audit(action, target, params, result)
+    except Exception:  # noqa: BLE001 - auditing must never break the action itself
+        pass
+
+
+@router.post("/admin/api/nim/key")
+async def admin_nim_key_set(request: Request):
+    """Store / replace the NVIDIA API key (write-only, Fernet-encrypted in settings).
+
+    The raw form is parsed by hand (no pydantic field) so no validation error can
+    ever echo the submitted value; the response carries only the masked status."""
+    guard = await _guard_write(request)
+    if guard:
+        return guard
+    form = await request.form()
+    value = str(form.get("api_key") or "")
+    try:
+        status = backends.set_stored_nvidia_key(value)
+    except backends.KeyStoreError as e:
+        _audit("admin.nim_key_set", None, {}, f"error:{e.code}")
+        return JSONResponse({"error": {"code": e.code, "message": e.message}, "key": backends.nim_key_status()},
+                            status_code=e.status)
+    _audit("admin.nim_key_set", None, {}, "ok")
+    return {"ok": True, "key": status}
+
+
+@router.post("/admin/api/nim/key/clear")
+async def admin_nim_key_clear(request: Request):
+    guard = await _guard_write(request)
+    if guard:
+        return guard
+    if config.nvidia_api_key:
+        return JSONResponse({"error": {"code": "env_locked", "message": "NVIDIA_API_KEY is set in the "
+                                       "environment; remove it there instead."}, "key": backends.nim_key_status()},
+                            status_code=409)
+    status = backends.clear_stored_nvidia_key()
+    _audit("admin.nim_key_clear", None, {}, "ok")
+    return {"ok": True, "key": status}
+
+
+# ---------------------------------------------------------------------------
+# Bus Board (second phone app) — server-to-server via busboard.py; the
+# BUSBOARD_OPS_TOKEN never leaves this process.
+# ---------------------------------------------------------------------------
+def busboard_audit_rows(limit: int = 20) -> list[dict]:
+    with db.cursor() as cur:
+        return [dict(r) for r in cur.execute(
+            "SELECT at, action, target, result FROM ops_audit WHERE substr(action,1,15)=? "
+            "ORDER BY id DESC LIMIT ?", ("admin.busboard.", limit)).fetchall()]
+
+
+@router.get("/admin/api/busboard")
+async def admin_busboard(request: Request, refresh: int = 0):
+    guard = _guard(request)
+    if guard:
+        return guard
+    from .templates import busboard_panels
+    res = await busboard.stats(force=bool(refresh))
+    return {**res, "panels": busboard_panels(res, busboard_audit_rows())}
+
+
+def _confirmed(form) -> bool:
+    return str(form.get("confirm") or "") in ("1", "yes", "true")
+
+
+@router.post("/admin/api/busboard/contributors/{id_hash}/{action}")
+async def admin_busboard_contributor(request: Request, id_hash: str, action: str):
+    guard = await _guard_write(request)
+    if guard:
+        return guard
+    if action not in busboard.ACTIONS:
+        return JSONResponse({"error": {"code": "bad_action", "message": "action must be block|unblock"}},
+                            status_code=400)
+    if not _confirmed(await request.form()):
+        return JSONResponse({"error": {"code": "confirm_required", "message": "confirm=1 is required"}},
+                            status_code=400)
+    target = id_hash[:128]
+    res = await busboard.contributor_action(id_hash, action)
+    code = None if res.get("ok") else (res.get("error") or {}).get("code", "failed")
+    _audit(f"admin.busboard.{action}", target, {"id_hash": target}, "ok" if code is None else f"error:{code}")
+    if code is not None:
+        status = 400 if code in ("bad_id_hash", "bad_action") else 503 if code == "not_configured" else 502
+        return JSONResponse({"ok": False, "error": res["error"]}, status_code=status)
+    return {"ok": True, "action": action, "id_hash": id_hash, "result": res.get("result")}
+
+
+@router.post("/admin/api/busboard/snapshot")
+async def admin_busboard_snapshot(request: Request):
+    guard = await _guard_write(request)
+    if guard:
+        return guard
+    if not _confirmed(await request.form()):
+        return JSONResponse({"error": {"code": "confirm_required", "message": "confirm=1 is required"}},
+                            status_code=400)
+    res = await busboard.snapshot()
+    code = None if res.get("ok") else (res.get("error") or {}).get("code", "failed")
+    _audit("admin.busboard.snapshot", None, {}, "ok" if code is None else f"error:{code}")
+    if code is not None:
+        return JSONResponse({"ok": False, "error": res["error"]}, status_code=502)
+    return {"ok": True, "result": res.get("result")}
 
 
 # ---------------------------------------------------------------------------

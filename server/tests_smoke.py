@@ -31,6 +31,9 @@ os.environ["SEKISHO_ADMIN_PASSWORD"] = "smoke-admin-pw"
 os.environ["SEKISHO_ALLOW_MOCK"] = "1"
 os.environ["SEKISHO_SESSION_SECRET"] = "smoke-session-secret-0123456789-abcdefghijklmnop"
 os.environ["CRON_SECRET"] = "smoke-cron-secret-0123456789"
+os.environ["SEKISHO_CAPTCHA_MAXNUMBER"] = "2000"  # small proof-of-work so the suite solves it fast
+for _k in ("SEKISHO_SECRETS_KEY", "BUSBOARD_URL", "BUSBOARD_OPS_TOKEN", "BUSBOARD_TIMEOUT"):
+    os.environ.pop(_k, None)
 for _k in ("SEKISHO_VLLM_URL", "SEKISHO_BACKENDS_JSON", "VERCEL", "NVIDIA_API_KEY", "SEKISHO_PROVIDER",
            "SEKISHO_CORS_ORIGINS", "SEKISHO_ENFORCE_BACKEND_ALLOWLIST", "VAPID_PUBLIC_KEY",
            "VAPID_PRIVATE_KEY", "SEKISHO_DAILY_LLM_CAP", "SEKISHO_RATE_LIMIT", "POSTGRES_URL"):
@@ -91,10 +94,18 @@ def _png_bytes(w: int = 8, h: int = 8) -> bytes:
 PNG = _png_bytes()
 
 
+def solved_captcha(c=None) -> str:
+    """Fetch a login captcha and solve it like the login page does (v7)."""
+    from sekisho import captcha as _cap
+    ch = (c or client).get("/admin/captcha").json()
+    return _cap.encode_payload(_cap.solve(ch))
+
+
 def admin_login() -> str:
     """Log in to /admin and return the session cookie (client jar cleared so only
     explicitly passed cookies are sent)."""
-    r = client.post("/admin/login", data={"password": "smoke-admin-pw"}, follow_redirects=False)
+    r = client.post("/admin/login", data={"password": "smoke-admin-pw", "altcha": solved_captcha()},
+                    follow_redirects=False)
     cookie = r.cookies.get("sekisho_admin")
     client.cookies.clear()
     assert cookie, f"admin login failed {r.status_code}"
@@ -1155,7 +1166,8 @@ check("v4 VERCEL=1 + no password: /admin shows disabled login", r.status_code ==
       and "disabled" in r.text.lower(), str(r.status_code))
 # with a password set + secret set: Secure; HttpOnly; SameSite=Strict cookie
 config.admin_password = "smoke-admin-pw-long-enough"
-r = _bare4.post("/admin/login", data={"password": "smoke-admin-pw-long-enough"}, follow_redirects=False)
+r = _bare4.post("/admin/login", data={"password": "smoke-admin-pw-long-enough", "altcha": solved_captcha(_bare4)},
+                follow_redirects=False)
 _sc = r.headers.get("set-cookie", "")
 check("v4 admin cookie is Secure; HttpOnly; SameSite=Strict; Path=/admin",
       r.status_code == 303 and "secure" in _sc.lower() and "httponly" in _sc.lower()
@@ -1172,9 +1184,10 @@ _bare4.cookies.clear()
 
 # ---- admin login lockout (DB-backed) ----
 _sec.reset_counters("adm:")
-_codes = [_bare4.post("/admin/login", data={"password": "nope"}, follow_redirects=False).status_code
-          for _ in range(5)]
-r = _bare4.post("/admin/login", data={"password": "smoke-admin-pw"}, follow_redirects=False)
+_codes = [_bare4.post("/admin/login", data={"password": "nope", "altcha": solved_captcha(_bare4)},
+                      follow_redirects=False).status_code for _ in range(5)]
+r = _bare4.post("/admin/login", data={"password": "smoke-admin-pw", "altcha": solved_captcha(_bare4)},
+                follow_redirects=False)
 check("v4 admin login lockout after 5 failures (even the right password -> 429)",
       _codes == [401] * 5 and r.status_code == 429 and not r.cookies.get("sekisho_admin"),
       f"{_codes} -> {r.status_code}")
@@ -3140,6 +3153,622 @@ def _():
     check(f"v6 ops: the ops token never appears in any response ({len(_OPS_RESPONSES)} checked) or the DB",
           len(_OPS_RESPONSES) > 40 and not leaks and _OPS_TOKEN not in blobs, str(leaks[:3]))
     check("v6 ops: config repr never shows the ops token", _OPS_TOKEN not in repr(config), "")
+
+
+# ===========================================================================
+# V7: one admin for both phone apps — password + proof-of-work captcha login,
+# NVIDIA key stored encrypted from the admin, phone pairing on Vercel, and the
+# Bus Board section (server-to-server, stubbed Bus Board HTTP server).
+# ===========================================================================
+import contextlib as _ctx7
+import hashlib as _hl7
+import hmac as _hm7
+import json as _json7
+import logging as _log7
+import re as _re7
+import time as _t7
+from http.server import ThreadingHTTPServer as _THS7
+from sekisho import busboard as _bb7, captcha as _cap7, vault as _vault7
+
+_c7 = TestClient(app)  # bare client: no cookies, no default CSRF header
+_IP7 = "testclient"    # what security.client_ip() sees for TestClient requests
+
+
+def _fails7() -> int:
+    return _sec.read_counter("adm:ip:" + _IP7, _sec._admin_window())
+
+
+def _login7(password: str, altcha: str | None):
+    data = {"password": password}
+    if altcha is not None:
+        data["altcha"] = altcha
+    r = _c7.post("/admin/login", data=data, follow_redirects=False)
+    _c7.cookies.clear()
+    return r
+
+
+# ------------------------------------------------------------- captcha ---
+@_audit("v7 captcha issue")
+def _():
+    r = _c7.get("/admin/captcha")
+    ch = r.json()
+    check("v7 captcha: GET /admin/captcha -> {algorithm SHA-256, challenge, salt(+expiry), maxnumber, signature}",
+          r.status_code == 200 and set(ch) == {"algorithm", "challenge", "maxnumber", "salt", "signature"}
+          and ch["algorithm"] == "SHA-256" and "?expires=" in ch["salt"] and ch["maxnumber"] == 2000
+          and len(ch["challenge"]) == 64 and len(ch["signature"]) == 64
+          and "no-store" in r.headers.get("cache-control", ""), str(ch))
+    exp = int(ch["salt"].split("?expires=")[1])
+    check("v7 captcha: expiry is carried in the salt and is at most 5 minutes away",
+          0 < exp - _t7.time() <= 300, str(exp - _t7.time()))
+    sol = _cap7.solve(ch)
+    base = _admin._session_key()
+    check("v7 captcha: challenge = sha256(salt + number), signature = HMAC-SHA256(challenge) with a derived key",
+          _hl7.sha256(f"{ch['salt']}{sol['number']}".encode()).hexdigest() == ch["challenge"]
+          and ch["signature"] == _hm7.new(_cap7.derive_key(base), ch["challenge"].encode(), "sha256").hexdigest()
+          and _cap7.derive_key(base) != base and len(_cap7.derive_key(base)) == 32, "")
+    out = _subproc("from sekisho.config import Config; print(Config().captcha_maxnumber)",
+                   {"SEKISHO_CAPTCHA_MAXNUMBER": ""})
+    check("v7 captcha: default maxnumber is the tuned 150000 (~1-3 s in a browser)", out == "150000", out)
+    saved = (config.on_vercel, config.admin_password)
+    try:
+        config.on_vercel, config.admin_password = True, ""
+        r = _c7.get("/admin/captcha")
+        check("v7 captcha: login disabled (fail closed) -> /admin/captcha 503 too", r.status_code == 503, str(r.status_code))
+    finally:
+        config.on_vercel, config.admin_password = saved
+
+
+@_audit("v7 captcha login")
+def _():
+    key = _admin._session_key()
+    _sec.reset_counters("adm:")
+    ch = _c7.get("/admin/captcha").json()
+    good = _cap7.encode_payload(_cap7.solve(ch))
+    r = _login7("smoke-admin-pw", good)
+    check("v7 login: password + solved captcha -> 303 + session cookie",
+          r.status_code == 303 and bool(r.cookies.get("sekisho_admin")) and _fails7() == 0, str(r.status_code))
+    r = _login7("smoke-admin-pw", good)
+    check("v7 login: replayed captcha solution rejected (401, no cookie) and counted",
+          r.status_code == 401 and "already used" in r.text and not r.cookies.get("sekisho_admin")
+          and _fails7() == 1, f"{r.status_code} fails={_fails7()}")
+
+    def case(label, payload, expect):
+        _sec.reset_counters("adm:")
+        rr = _login7("smoke-admin-pw", payload)
+        check(f"v7 login: {label} -> 401, no cookie, counted as a failed attempt",
+              rr.status_code == 401 and not rr.cookies.get("sekisho_admin") and expect in rr.text
+              and _fails7() == 1, f"{rr.status_code} fails={_fails7()}")
+
+    case("no captcha field (login without captcha)", None, "needs JavaScript")
+    case("empty captcha", "", "needs JavaScript")
+    ch = _c7.get("/admin/captcha").json()
+    sol = _cap7.solve(ch)
+    case("wrong solution", _cap7.encode_payload({**sol, "number": (sol["number"] + 1) % 2001}), "answer was wrong")
+    ch = _cap7.issue(key, now=_t7.time() - 400)
+    case("expired challenge (issued 400 s ago)", _cap7.encode_payload(_cap7.solve(ch)), "expired")
+    ch = _c7.get("/admin/captcha").json()
+    sol = _cap7.solve(ch)
+    bad_sig = sol["signature"][:-1] + ("0" if sol["signature"][-1] != "0" else "1")
+    case("tampered signature", _cap7.encode_payload({**sol, "signature": bad_sig}), "not issued by this server")
+    long_salt = sol["salt"].split("?expires=")[0] + "?expires=" + str(int(_t7.time()) + 280)
+    forged = {**sol, "salt": long_salt, "challenge": _hl7.sha256(f"{long_salt}{sol['number']}".encode()).hexdigest()}
+    case("forged salt/challenge (expiry edited)", _cap7.encode_payload(forged), "not issued by this server")
+    other = _cap7.issue(b"some-other-server-secret-0123456789")
+    case("challenge signed by another server's secret", _cap7.encode_payload(_cap7.solve(other)),
+         "not issued by this server")
+    case("malformed payload", "!!!not-base64!!!", "malformed")
+    case("wrong algorithm", _cap7.encode_payload({**sol, "algorithm": "SHA-1"}), "malformed")
+
+    _sec.reset_counters("adm:")
+    ch = _c7.get("/admin/captcha").json()
+    sol = _cap7.solve(ch)
+    r = _login7("smoke-admin-pw", _cap7.encode_payload({**sol, "number": (sol["number"] + 7) % 2001}))
+    check("v7 login: captcha is checked BEFORE the password (right password + bad captcha -> 401)",
+          r.status_code == 401 and not r.cookies.get("sekisho_admin"), str(r.status_code))
+    _sec.reset_counters("adm:")
+    codes = [_login7("smoke-admin-pw", None).status_code for _ in range(5)]
+    ok_payload = solved_captcha(_c7)
+    r = _login7("smoke-admin-pw", ok_payload)
+    check("v7 login: 5 failed captchas lock the login (even password + valid captcha -> 429)",
+          codes == [401] * 5 and r.status_code == 429 and not r.cookies.get("sekisho_admin"), f"{codes} {r.status_code}")
+    _sec.reset_counters("adm:")
+    # the replay set is in the DB: a 2nd instance consuming a solution makes it used here too
+    ch = _c7.get("/admin/captcha").json()
+    payload = _cap7.encode_payload(_cap7.solve(ch))
+    out = _subproc("from sekisho import db, captcha, admin; db.init_from_config(); "
+                   f"print(captcha.verify({payload!r}, admin._session_key()))")
+    check("v7 captcha: verified on a 2nd instance (shared secret), then replay-rejected here (DB-backed)",
+          out == "None" and _cap7.verify(payload, key) == "replayed", out)
+
+    page = _c7.get("/admin")
+    csp = page.headers.get("content-security-policy", "")
+    n = _re7.search(r"'nonce-([^']+)'", csp)
+    check("v7 login page: inline PoW solver runs under the CSP nonce, no external script, no-JS fallback",
+          page.status_code == 200 and bool(n) and f'<script nonce="{n.group(1)}">' in page.text
+          and "<script src" not in page.text and "crypto.subtle" in page.text and "/admin/captcha" in page.text
+          and 'name="altcha"' in page.text and "<noscript>" in page.text and 'id="login-btn" disabled' in page.text
+          and 'aria-live="polite"' in page.text, csp[:80])
+
+
+# ------------------------------------------------------- NVIDIA key ---
+@_audit("v7 nvidia key")
+def _():
+    db_key = "nvapi-STORED-dbkey-0123456789abcdefQRS"
+    env_key = "nvapi-ENVKEY-0123456789abcdefTUVWX"
+    saved = (config.provider, config.nvidia_api_key, config.allow_mock, config.secrets_key)
+    real_post, real_get = backends._http_post_json, backends._http_get_json
+    calls: list = []
+    upstream = {"echo_key": False}
+
+    async def fpost(url, payload, headers, timeout):
+        calls.append({"url": url, "model": payload.get("model"), "auth": headers.get("Authorization")})
+        if upstream["echo_key"]:
+            return 401, {"error": f"Invalid key {headers.get('Authorization')}"}
+        return 200, {"choices": [{"message": {"content": "Steady steps."}}], "model": payload.get("model")}
+
+    async def fget(url, headers, timeout):
+        return 200, {"data": [{"id": "x"}]}
+
+    responses: list = []
+    logs: list = []
+
+    class _Grab(_log7.Handler):
+        def emit(self, rec):
+            try:
+                logs.append(rec.getMessage())
+            except Exception:  # noqa: BLE001
+                pass
+
+    grab, root = _Grab(level=1), _log7.getLogger()
+    old_level = root.level
+    root.addHandler(grab)
+    root.setLevel(1)
+    out_buf, err_buf = io.StringIO(), io.StringIO()
+    try:
+        with _ctx7.redirect_stdout(out_buf), _ctx7.redirect_stderr(err_buf):
+            config.provider, config.nvidia_api_key, config.allow_mock = "", "", False
+            backends._http_post_json, backends._http_get_json = fpost, fget
+            db.delete_setting("vault:nvidia_api_key")
+
+            # -- storage disabled without SEKISHO_SECRETS_KEY (or a short one) --
+            for label, sk in (("unset", ""), ("shorter than 32", "too-short-secrets-key")):
+                config.secrets_key = sk
+                _vault7.invalidate()
+                st = client.get("/admin/api/nim", cookies=ac).json()["key"]
+                r = client.post("/admin/api/nim/key", cookies=ac, data={"api_key": db_key})
+                responses.append(r)
+                check(f"v7 key: SEKISHO_SECRETS_KEY {label} -> storage disabled (503, clear message, nothing stored)",
+                      r.status_code == 503 and r.json()["error"]["code"] == "secrets_key_missing"
+                      and "SEKISHO_SECRETS_KEY" in r.json()["error"]["message"] and st["storage_available"] is False
+                      and "SEKISHO_SECRETS_KEY" in st["storage_message"]
+                      and db.get_setting("vault:nvidia_api_key") is None and db_key not in r.text, str(r.status_code))
+
+            # -- Fernet round trip --
+            config.secrets_key = "smoke-secrets-key-" + "k" * 24
+            _vault7.invalidate()
+            _vault7.put("probe", "plain-probe-value-123")
+            raw = db.get_setting("vault:probe") or ""
+            check("v7 vault: Fernet round trip; ciphertext in the DB != plaintext (HKDF-derived key)",
+                  _vault7.get("probe") == "plain-probe-value-123" and raw.startswith("gAAAA")
+                  and "plain-probe-value-123" not in raw
+                  and _vault7.derive_fernet_key(config.secrets_key) != _vault7.derive_fernet_key(config.secrets_key + "x")
+                  and len(_b64_6.urlsafe_b64decode(_vault7.derive_fernet_key(config.secrets_key))) == 32, raw[:12])
+            _vault7.delete("probe")
+
+            # -- set from the admin --
+            st0 = client.get("/admin/api/nim", cookies=ac).json()["key"]
+            r = client.post("/admin/api/nim/key", cookies=ac, data={"api_key": db_key})
+            responses.append(r)
+            raw = db.get_setting("vault:nvidia_api_key") or ""
+            check("v7 key: admin stores the key -> 200 with masked hint only (last 4), encrypted at rest",
+                  st0["source"] is None and r.status_code == 200 and r.json()["key"]["source"] == "admin"
+                  and r.json()["key"]["hint"].endswith(db_key[-4:]) and db_key not in r.text
+                  and db_key[-12:] not in r.text and raw.startswith("gAAAA") and db_key not in raw
+                  and db_key[6:20] not in raw, r.text[:120])
+            for bad in ("short-key", "nvapi has spaces in it 0123456789"):
+                r = client.post("/admin/api/nim/key", cookies=ac, data={"api_key": bad})
+                responses.append(r)
+                check(f"v7 key: invalid key value rejected (400 bad_key) without echoing it ({bad[:9]}...)",
+                      r.status_code == 400 and r.json()["error"]["code"] == "bad_key" and bad not in r.text,
+                      str(r.status_code))
+            check("v7 key: a stored key alone switches the auto provider to NIM",
+                  backends.provider_mode() == "nim" and backends.nvidia_key_source() == "admin", backends.provider_mode())
+
+            # -- slot editing + calls use the DB key --
+            r = client.post("/admin/api/nim/slot", cookies=ac, data={"task": "chat", "model": "meta/llama-3.1-8b-instruct"})
+            ukey = _fresh("v7keyuser", profile=_PROFILE)
+            uid = _uid_of(ukey)
+            relax(ukey)
+            _sec.reset_counters("llm:")
+            calls.clear()
+            rc = client.post("/api/v1/chat", headers=bearer(ukey), json={"messages": [{"role": "user", "content": "hi"}]})
+            responses.append(rc)
+            check("v7 key: chat with the DB key -> slot model + Bearer <stored key> to integrate.api.nvidia.com",
+                  r.status_code == 200 and rc.status_code == 200 and calls and calls[0]["model"] == "meta/llama-3.1-8b-instruct"
+                  and calls[0]["auth"] == f"Bearer {db_key}" and calls[0]["url"].startswith("https://integrate.api.nvidia.com/"),
+                  str(calls[:1]))
+            calls.clear()
+            rt = client.post("/admin/api/nim/test", cookies=ac, data={"task": "chat"})
+            responses.append(rt)
+            check("v7 key: Test button path (/admin/api/nim/test) works with the stored key",
+                  rt.status_code == 200 and rt.json()["ok"] is True and rt.json()["model"] == "meta/llama-3.1-8b-instruct"
+                  and calls and calls[0]["auth"] == f"Bearer {db_key}", rt.text[:120])
+            upstream["echo_key"] = True
+            rt = client.post("/admin/api/nim/test", cookies=ac, data={"task": "chat"})
+            responses.append(rt)
+            check("v7 key: an upstream error that echoes the stored key is scrubbed",
+                  rt.json()["ok"] is False and db_key not in rt.text and "***" in rt.text, rt.text[:120])
+            upstream["echo_key"] = False
+
+            # -- leak scan with the stored key active --
+            _accounts.set_admin(uid, True)
+            for m, p, d in (("GET", "/admin", None), ("GET", "/admin/api/state", None),
+                            ("GET", "/admin/api/backends", None), ("GET", "/admin/api/nim", None),
+                            ("GET", "/admin/api/users", None), ("GET", "/admin/api/push/status", None),
+                            ("GET", "/admin/api/busboard", None), ("GET", "/api/v1/health", None)):
+                responses.append(client.request(m, p, cookies=ac, data=d))
+            for p in ("/api/v1/keeper/backends", "/api/v1/keeper/overview", "/api/v1/health"):
+                relax(ukey)
+                responses.append(client.get(p, headers=bearer(ukey)))
+            for p in ("/api/ops/v1/summary", "/api/ops/v1/audit", "/api/ops/v1/requests", "/api/ops/v1/users",
+                      "/api/ops/v1/timeseries"):
+                responses.append(_og(p))
+            responses.append(_op({"action": "set_model", "slot": "chat", "model": "meta/llama-3.1-8b-instruct"}))
+
+            # -- env NVIDIA_API_KEY wins --
+            config.nvidia_api_key = env_key
+            calls.clear()
+            relax(ukey)
+            rc = client.post("/api/v1/chat", headers=bearer(ukey), json={"messages": [{"role": "user", "content": "hi"}]})
+            st = client.get("/admin/api/nim", cookies=ac).json()["key"]
+            before = db.get_setting("vault:nvidia_api_key")
+            r1 = client.post("/admin/api/nim/key", cookies=ac, data={"api_key": "nvapi-another-key-0123456789"})
+            r2 = client.post("/admin/api/nim/key/clear", cookies=ac)
+            responses.extend([rc, r1, r2])
+            check("v7 key: env NVIDIA_API_KEY takes precedence (calls use it; admin shows 'environment'; field locked)",
+                  calls and calls[0]["auth"] == f"Bearer {env_key}" and st["source"] == "env" and st["env_locked"] is True
+                  and st["hint"].endswith(env_key[-4:]) and r1.status_code == 409 and r1.json()["error"]["code"] == "env_locked"
+                  and r2.status_code == 409 and db.get_setting("vault:nvidia_api_key") == before,
+                  f"{st.get('source')} {r1.status_code} {r2.status_code}")
+            config.nvidia_api_key = ""
+
+            # -- master key rotated -> stored key unreadable, never "half works" --
+            config.secrets_key = "rotated-secrets-key-" + "r" * 24
+            _vault7.invalidate()
+            st = backends.nim_key_status()
+            check("v7 key: rotated SEKISHO_SECRETS_KEY -> stored key reads as unreadable, not used",
+                  st["stored_state"] == "undecryptable" and backends.nvidia_key() == "" and st["configured"] is False,
+                  str(st["stored_state"]))
+            config.secrets_key = "smoke-secrets-key-" + "k" * 24
+            _vault7.invalidate()
+
+            # -- CSRF on the key actions --
+            for p, d in (("/admin/api/nim/key", {"api_key": db_key}), ("/admin/api/nim/key/clear", None)):
+                r_no = _c7.post(p, cookies=ac, data=d)
+                r_x = _c7.post(p, cookies=ac, data=d, headers={"X-CSRF-Token": ADMIN_CSRF, "Origin": "https://evil.example"})
+                responses.extend([r_no, r_x])
+                check(f"v7 key: CSRF enforced on {p} (no token 403, cross-site 403)",
+                      r_no.status_code == 403 and r_x.status_code == 403
+                      and r_no.json()["error"]["code"] == "csrf_failed", f"{r_no.status_code} {r_x.status_code}")
+            _c7.cookies.clear()
+
+            # -- clear --
+            r = client.post("/admin/api/nim/key/clear", cookies=ac)
+            responses.append(r)
+            check("v7 key: clear removes the stored ciphertext; key no longer configured",
+                  r.status_code == 200 and r.json()["key"]["source"] is None
+                  and db.get_setting("vault:nvidia_api_key") is None and backends.nvidia_key() == "", r.text[:100])
+            audit = [x for x in _og("/api/ops/v1/audit").json()["audit"] if x["action"].startswith("admin.nim_key")]
+            check("v7 key: set/clear written to the audit trail (no key material in params)",
+                  {"admin.nim_key_set", "admin.nim_key_clear"} <= {a["action"] for a in audit}
+                  and all(a["params_json"] == "{}" for a in audit), str(audit[:2]))
+
+        with db.cursor() as cur:
+            blobs = _json7.dumps([dict(x) for x in cur.execute("SELECT * FROM request_log").fetchall()]
+                                 + [dict(x) for x in cur.execute("SELECT * FROM ops_audit").fetchall()]
+                                 + [dict(x) for x in cur.execute("SELECT * FROM llm_calls").fetchall()]
+                                 + [dict(x) for x in cur.execute("SELECT * FROM settings").fetchall()])
+        leaks = [f"{x.request.method} {x.request.url.path}" for x in responses
+                 if any(k in x.text or k[-12:] in x.text or k in str(dict(x.headers)) for k in (db_key, env_key))]
+        printed = out_buf.getvalue() + err_buf.getvalue() + "\n".join(logs)
+        check(f"v7 key: stored/env key never in any admin/keeper/health/ops response ({len(responses)} checked)",
+              len(responses) > 30 and not leaks, ",".join(leaks[:4]))
+        check("v7 key: key never in the request log, audit, llm_calls, settings (plaintext), logs or stdout",
+              db_key not in blobs and env_key not in blobs and db_key[-12:] not in blobs
+              and db_key not in printed and env_key not in printed, "")
+    finally:
+        root.removeHandler(grab)
+        root.setLevel(old_level)
+        backends._http_post_json, backends._http_get_json = real_post, real_get
+        config.provider, config.nvidia_api_key, config.allow_mock, config.secrets_key = saved
+        db.delete_setting("vault:nvidia_api_key")
+        db.delete_setting("vault:probe")
+        db.delete_setting("nim_model_chat")
+        _vault7.invalidate()
+        _sec.reset_counters("llm:")
+
+
+# -------------------------------------------------------- phone pairing ---
+@_audit("v7 pairing")
+def _():
+    import qrcode as _qr7
+    saved = (config.on_vercel, config.public_url, os.environ.get("VERCEL_PROJECT_PRODUCTION_URL"),
+             os.environ.get("VERCEL_URL"))
+    try:
+        config.on_vercel, config.public_url = True, None
+        os.environ["VERCEL_PROJECT_PRODUCTION_URL"] = "harahachi-prod.vercel.app"
+        os.environ["VERCEL_URL"] = "harahachi-git-abc123-preview.vercel.app"
+        r = client.post("/admin/api/pair", cookies=ac)
+        pj = r.json()
+        qp = _json7.loads(pj["qr_payload"])
+        q = client.get(f"/admin/api/qr?token={pj['token']}", cookies=ac)
+        buf = io.BytesIO()
+        _qr7.make(_json7.dumps({"v": 1, "url": "https://harahachi-prod.vercel.app", "token": pj["token"]})).save(buf, format="PNG")
+        claim = client.post("/api/v1/pair/claim", json={"token": pj["token"], "device_name": "v7-phone"})
+        check("v7 pairing on Vercel: QR encodes https://<VERCEL_PROJECT_PRODUCTION_URL> + token, and the token claims",
+              r.status_code == 200 and pj["url"] == "https://harahachi-prod.vercel.app" and qp["url"] == pj["url"]
+              and qp["v"] == 1 and q.status_code == 200 and q.content == buf.getvalue() and claim.status_code == 201,
+              f"{pj.get('url')} {q.status_code} {claim.status_code}")
+    finally:
+        config.on_vercel, config.public_url = saved[0], saved[1]
+        for k, v in (("VERCEL_PROJECT_PRODUCTION_URL", saved[2]), ("VERCEL_URL", saved[3])):
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+# ------------------------------------------------------------- Bus Board ---
+_BB_TOKEN = "bb-" + "T0ken_Value-" * 4 + "end-xyz"   # 58 chars
+_BB_STATS = {
+    "version": "2.4.1", "boot_id": "boot-7f3a", "started_at": "2026-10-16T08:00:00Z", "uptime_s": 93784,
+    "requests": {"by_route": {
+        "GET /v1/board": {"count": 1234, "errors_4xx": 5, "errors_5xx": 1, "p50_ms": 42, "p95_ms": 310},
+        "POST /v1/pings": {"count": 777, "errors_4xx": 12, "errors_5xx": 0, "p50_ms": 18, "p95_ms": 95}}},
+    "sse": {"open": 7, "total_opened": 420},
+    "board_queries": {"top": [{"from": "Majestic", "to": "Whitefield", "count": 88},
+                              {"from": "<script>alert(1)</script>", "to": "Hebbal", "count": 3}]},
+    "pings": {"received": 1000, "accepted": 900, "rejected": {"too_fast": 60, "off_route": 40}},
+    "contributors": {"count": 42, "trust_histogram": {"0-0.2": 3, "0.2-0.4": 5, "0.4-0.6": 10, "0.6-0.8": 14,
+                                                      "0.8-1": 10},
+                     "top": [{"id_hash": "c0ffee1234abcd", "score": 0.97, "accepted": 310},
+                             {"id_hash": "beadfeed9876", "score": 0.91, "accepted": 120}]},
+    "vehicles": {"active": 12, "by_route": {"500D": 4, "335E": 8}},
+    "feed": {"stops": 8123, "unverified_stops": 77, "routes": 512, "version": "feed-2026-10-01"},
+    "runtime": {"python": "3.12", "rss_mb": 88},
+}
+
+
+class _BBStub(_BH):
+    calls: list = []
+    slow = {"s": 0.0}
+
+    def log_message(self, *a):  # quiet
+        pass
+
+    def _send(self, code: int, obj) -> None:
+        body = _json7.dumps(obj).encode()
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionError, OSError):  # the timeout test's client already gave up
+            pass
+
+    def _ok(self) -> bool:
+        return self.headers.get("Authorization") == f"Bearer {_BB_TOKEN}"
+
+    def do_GET(self):  # noqa: N802
+        _BBStub.calls.append(("GET", self.path, self.headers.get("Authorization")))
+        if _BBStub.slow["s"]:
+            _t7.sleep(_BBStub.slow["s"])
+        if not self._ok() or self.path != "/v1/ops/stats":
+            return self._send(404, {"detail": "Not Found"})
+        self._send(200, _BB_STATS)
+
+    def do_POST(self):  # noqa: N802
+        n = int(self.headers.get("Content-Length") or 0)
+        if n:
+            self.rfile.read(n)
+        _BBStub.calls.append(("POST", self.path, self.headers.get("Authorization")))
+        m = _re7.match(r"^/v1/ops/contributors/([^/]+)/(block|unblock)$", self.path)
+        if not self._ok():
+            return self._send(404, {"detail": "Not Found"})
+        if m:
+            return self._send(200, {"ok": True, "id_hash": m.group(1), "blocked": m.group(2) == "block"})
+        if self.path == "/v1/ops/snapshot":
+            return self._send(200, {"ok": True, "saved_at": "2026-10-16T12:00:00Z"})
+        self._send(404, {"detail": "Not Found"})
+
+
+@_audit("v7 busboard")
+def _():
+    srv = _THS7(("127.0.0.1", 0), _BBStub)
+    srv.daemon_threads = True
+    _thr.Thread(target=srv.serve_forever, daemon=True).start()
+    stub_url = f"http://127.0.0.1:{srv.server_address[1]}"
+    saved = (config.busboard_url, config.busboard_token, config.busboard_timeout, config.on_vercel)
+    responses: list = []
+
+    def bb(path="/admin/api/busboard", **kw):
+        r = client.get(path, cookies=ac, **kw)
+        responses.append(r)
+        return r
+
+    def post(path, data=None, cl=None, **kw):
+        r = (cl or client).post(path, cookies=ac, data=data, **kw)
+        responses.append(r)
+        return r
+
+    try:
+        # -- not connected --
+        config.busboard_url, config.busboard_token = "", ""
+        _bb7.clear_cache()
+        _BBStub.calls.clear()
+        r = bb()
+        j = r.json()
+        dash = client.get("/admin", cookies=ac).text
+        check("v7 busboard: unset env -> tab says 'Bus Board not connected' (no outbound call)",
+              r.status_code == 200 and j["connected"] is False and j["configured"] is False
+              and "Bus Board not connected" in j["panels"]["busboard"] and "BUSBOARD_URL" in j["panels"]["busboard"]
+              and not _BBStub.calls and 'data-tab="busboard"' in dash and 'data-tab="riders"' in dash
+              and 'id="scene-busboard"' in dash, str(j.get("error")))
+        r = _c7.get("/admin/api/busboard")
+        check("v7 busboard: /admin/api/busboard needs the admin session (401)", r.status_code == 401, str(r.status_code))
+        config.busboard_url, config.busboard_token = stub_url, "too-short-token"
+        j = bb().json()
+        check("v7 busboard: token shorter than 48 chars -> not connected, clear message",
+              j["connected"] is False and "48" in j["error"]["message"] and not _BBStub.calls, str(j.get("error")))
+        config.on_vercel, config.busboard_token = True, _BB_TOKEN
+        j = bb().json()
+        check("v7 busboard: on Vercel an http:// BUSBOARD_URL is refused (token only over https)",
+              j["connected"] is False and "https" in j["error"]["message"] and not _BBStub.calls, str(j.get("error")))
+        config.on_vercel = saved[3]
+
+        # -- connected: stats fetched server-side with the bearer, rendered --
+        _bb7.clear_cache()
+        r = bb()
+        j = r.json()
+        ov, rd = j["panels"]["busboard"], j["panels"]["riders"]
+        check("v7 busboard: stats fetched server-side with Authorization: Bearer <token>",
+              r.status_code == 200 and j["connected"] is True and _BBStub.calls
+              and _BBStub.calls[-1] == ("GET", "/v1/ops/stats", f"Bearer {_BB_TOKEN}"), str(_BBStub.calls[-1:]))
+        check("v7 busboard: health/uptime, per-route requests + latency/errors, streams, vehicles, feed rendered",
+              all(x in ov for x in ("Connected", "2.4.1", "boot-7f3a", "1d 2h 3m", "GET /v1/board", "1,234", "310 ms",
+                                    "POST /v1/pings", "420", "500D", "8,123", "feed-2026-10-01", "Majestic",
+                                    "Whitefield", "rss_mb"))
+              and ov.index("GET /v1/board") < ov.index("POST /v1/pings"), ov[:200])
+        check("v7 busboard: ping outcomes, trust histogram, top contributors with Block/Unblock rendered",
+              all(x in rd for x in ("too_fast", "off_route", "90.0%", "0.6-0.8", "<svg", "c0ffee1234abcd", "0.97",
+                                    'data-action="block" data-id="c0ffee1234abcd"',
+                                    'data-action="unblock" data-id="beadfeed9876"')), rd[:200])
+        check("v7 busboard: Bus Board strings are HTML-escaped in the panels",
+              "&lt;script&gt;alert(1)&lt;/script&gt;" in ov and "<script>alert(1)" not in ov, "")
+        n = len(_BBStub.calls)
+        j2 = bb().json()
+        j3 = bb("/admin/api/busboard?refresh=1").json()
+        check("v7 busboard: 30 s in-process cache (2nd view no call; Refresh forces one)",
+              j2["cached"] is True and len(_BBStub.calls) == n + 1 and j3["cached"] is False
+              and _bb7.CACHE_TTL == 30, f"{n} -> {len(_BBStub.calls)}")
+
+        # -- block / unblock / snapshot --
+        n = len(_BBStub.calls)
+        r = post("/admin/api/busboard/contributors/c0ffee1234abcd/block", {"confirm": "1"})
+        blk = _BBStub.calls[n:]
+        a0 = _og("/api/ops/v1/audit").json()["audit"][0]
+        check("v7 busboard: Block sends POST /v1/ops/contributors/<id_hash>/block with the bearer; audited",
+              r.status_code == 200 and r.json()["ok"] is True
+              and blk == [("POST", "/v1/ops/contributors/c0ffee1234abcd/block", f"Bearer {_BB_TOKEN}")]
+              and a0["action"] == "admin.busboard.block" and a0["target"] == "c0ffee1234abcd" and a0["result"] == "ok",
+              f"{r.status_code} {blk} {a0}")
+        n = len(_BBStub.calls)
+        r = post("/admin/api/busboard/contributors/beadfeed9876/unblock", {"confirm": "1"})
+        a0 = _og("/api/ops/v1/audit").json()["audit"][0]
+        check("v7 busboard: Unblock sends POST .../beadfeed9876/unblock with the bearer; audited",
+              r.status_code == 200 and _BBStub.calls[n:] == [("POST", "/v1/ops/contributors/beadfeed9876/unblock",
+                                                              f"Bearer {_BB_TOKEN}")]
+              and a0["action"] == "admin.busboard.unblock" and a0["result"] == "ok", str(_BBStub.calls[n:]))
+        j = bb().json()
+        check("v7 busboard: an action invalidates the stats cache (next view refetches) and lists it in the audit card",
+              j["cached"] is False and "admin.busboard.unblock" in j["panels"]["riders"], str(j.get("cached")))
+        n = len(_BBStub.calls)
+        r1 = post("/admin/api/busboard/contributors/c0ffee1234abcd/block", {})
+        r2 = post("/admin/api/busboard/contributors/bad.hash!/block", {"confirm": "1"})
+        r3 = post("/admin/api/busboard/contributors/c0ffee1234abcd/delete", {"confirm": "1"})
+        check("v7 busboard: confirmation required; bad id_hash / action rejected (400) with no call to Bus Board",
+              r1.status_code == 400 and r1.json()["error"]["code"] == "confirm_required"
+              and r2.status_code == 400 and r2.json()["error"]["code"] == "bad_id_hash"
+              and r3.status_code == 400 and len(_BBStub.calls) == n, f"{r1.status_code} {r2.status_code} {r3.status_code}")
+        r = post("/admin/api/busboard/snapshot", {"confirm": "1"})
+        a0 = _og("/api/ops/v1/audit").json()["audit"][0]
+        check("v7 busboard: Snapshot sends POST /v1/ops/snapshot with the bearer; audited",
+              r.status_code == 200 and _BBStub.calls[-1] == ("POST", "/v1/ops/snapshot", f"Bearer {_BB_TOKEN}")
+              and a0["action"] == "admin.busboard.snapshot" and a0["result"] == "ok", str(_BBStub.calls[-1:]))
+
+        # -- CSRF on the Bus Board actions --
+        n = len(_BBStub.calls)
+        bad = {}
+        for p in ("/admin/api/busboard/contributors/c0ffee1234abcd/block",
+                  "/admin/api/busboard/contributors/c0ffee1234abcd/unblock", "/admin/api/busboard/snapshot"):
+            for label, h in (("no token", {}), ("wrong token", {"X-CSRF-Token": "f" * 48}),
+                             ("cross-site", {"X-CSRF-Token": ADMIN_CSRF, "Origin": "https://evil.example"})):
+                rr = post(p, {"confirm": "1"}, cl=_c7, headers=h)
+                if rr.status_code != 403:
+                    bad[f"{p} {label}"] = rr.status_code
+            rr = _c7.post(p, data={"confirm": "1"}, headers={"X-CSRF-Token": ADMIN_CSRF})
+            if rr.status_code != 401:
+                bad[f"{p} no session"] = rr.status_code
+        _c7.cookies.clear()
+        check("v7 busboard: CSRF + session enforced on block/unblock/snapshot (403/401, Bus Board never called)",
+              not bad and len(_BBStub.calls) == n, str(bad))
+
+        # -- wrong token (Bus Board answers 404) --
+        config.busboard_token = "wrong-" + _BB_TOKEN
+        j = bb("/admin/api/busboard?refresh=1").json()
+        r = post("/admin/api/busboard/contributors/c0ffee1234abcd/block", {"confirm": "1"})
+        check("v7 busboard: 404 from Bus Board -> 'check the token' (stats and actions)",
+              j["connected"] is False and j["error"]["code"] == "bad_token" and "check the token" in j["panels"]["busboard"]
+              and r.status_code == 502 and "check the token" in r.json()["error"]["message"],
+              f"{j.get('error')} {r.status_code}")
+        config.busboard_token = _BB_TOKEN
+
+        # -- timeout --
+        config.busboard_timeout = 0.5
+        _BBStub.slow["s"] = 2.0
+        t0 = _t7.monotonic()
+        j = bb("/admin/api/busboard?refresh=1").json()
+        took = _t7.monotonic() - t0
+        _BBStub.slow["s"] = 0.0
+        check("v7 busboard: slow Bus Board -> clean timeout message within the bound",
+              j["connected"] is False and j["error"]["code"] == "timeout" and "did not answer within 0.5 s" in
+              j["panels"]["busboard"] and took < 1.9, f"{j.get('error')} {took:.2f}s")
+        check("v7 busboard: timeout capped at 8 s whatever BUSBOARD_TIMEOUT says",
+              _subproc("from sekisho.config import Config; print(Config().busboard_timeout)",
+                       {"BUSBOARD_TIMEOUT": "60"}) == "8.0", "")
+        config.busboard_timeout = saved[2]
+
+        # -- unreachable --
+        import socket as _so7
+        s = _so7.socket()
+        s.bind(("127.0.0.1", 0))
+        dead = s.getsockname()[1]
+        s.close()
+        config.busboard_url = f"http://127.0.0.1:{dead}"
+        j = bb("/admin/api/busboard?refresh=1").json()
+        check("v7 busboard: unreachable Bus Board -> clean 'Could not reach' message",
+              j["connected"] is False and j["error"]["code"] in ("unreachable", "timeout")
+              and ("Could not reach Bus Board" in j["error"]["message"] or "did not answer" in j["error"]["message"]),
+              str(j.get("error")))
+        config.busboard_url = stub_url
+
+        # -- token never reaches the browser / DB --
+        responses.append(client.get("/admin", cookies=ac))
+        with db.cursor() as cur:
+            blobs = _json7.dumps([dict(x) for x in cur.execute("SELECT * FROM ops_audit").fetchall()]
+                                 + [dict(x) for x in cur.execute("SELECT * FROM request_log").fetchall()]
+                                 + [dict(x) for x in cur.execute("SELECT * FROM settings").fetchall()])
+        leaks = [f"{x.request.method} {x.request.url.path}" for x in responses
+                 if _BB_TOKEN in x.text or _BB_TOKEN[-16:] in x.text or _BB_TOKEN in str(dict(x.headers))]
+        check(f"v7 busboard: BUSBOARD_OPS_TOKEN never in any admin response/HTML ({len(responses)}) or the DB",
+              len(responses) > 15 and not leaks and _BB_TOKEN not in blobs and _BB_TOKEN not in repr(config),
+              ",".join(leaks[:3]))
+    finally:
+        _BBStub.slow["s"] = 0.0
+        srv.shutdown()
+        srv.server_close()
+        config.busboard_url, config.busboard_token, config.busboard_timeout, config.on_vercel = saved
+        _bb7.clear_cache()
+
+
+@_audit("v7 docs")
+def _():
+    doc = (_root / "DEPLOY_VERCEL.md").read_text(encoding="utf-8")
+    check("v7 docs: DEPLOY_VERCEL.md covers the server-only admin (captcha) + new env vars, no Bansho/web app",
+          all(x in doc for x in ("/admin", "captcha", "SEKISHO_ADMIN_PASSWORD", "SEKISHO_SECRETS_KEY", "BUSBOARD_URL",
+                                 "BUSBOARD_OPS_TOKEN", "server-only"))
+          and "Bansho" not in doc and "app/dist" not in doc and "npm --prefix app" not in doc, "")
 
 
 # ---------------------------------------------------------------------------

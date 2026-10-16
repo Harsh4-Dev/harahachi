@@ -47,8 +47,11 @@ def _banner() -> None:
     else:
         print(f"  Admin PW  : (from SEKISHO_ADMIN_PASSWORD)")
     print(f"  Database  : {db.backend_kind()}")
-    if config.provider_mode() == "nim":
-        print(f"  LLM       : NVIDIA NIM ({'key set' if config.nvidia_api_key else 'NVIDIA_API_KEY missing'})")
+    from . import backends
+    if backends.provider_mode() == "nim":
+        src = backends.nvidia_key_source()
+        state = {"env": "key from NVIDIA_API_KEY", "admin": "key stored from the admin"}.get(src, "no key yet")
+        print(f"  LLM       : NVIDIA NIM ({state})")
     elif config.vllm_url:
         print(f"  vLLM      : {config.vllm_url}  model={config.vllm_model or '?'}")
     else:

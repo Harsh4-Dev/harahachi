@@ -358,6 +358,8 @@ SCENE_TABS = {
     "backends": {"seed": 4404, "sea": "right",  "ranges": 5, "villages": 2, "boats": 1, "cartouche": (60, 70)},
     "requests": {"seed": 5505, "sea": "bottom", "ranges": 4, "villages": 4, "boats": 3, "cartouche": (1090, 560)},
     "push":     {"seed": 6606, "sea": "left",   "ranges": 6, "villages": 3, "boats": 2, "cartouche": (60, 560)},
+    "busboard": {"seed": 7707, "sea": "bottom", "ranges": 3, "villages": 5, "boats": 2, "cartouche": (60, 70)},
+    "riders":   {"seed": 8808, "sea": "right",  "ranges": 4, "villages": 4, "boats": 1, "cartouche": (1090, 70)},
 }
 
 
@@ -625,30 +627,125 @@ def _petals_html() -> str:
 # ---------------------------------------------------------------------------
 # Login page
 # ---------------------------------------------------------------------------
-LOGIN_HTML = f"""<!doctype html><html lang="en"><head>{HEAD}<title>Sekisho · 関所</title></head>
+# Password + self-hosted proof-of-work captcha (see captcha.py). The inline
+# script runs under the admin CSP nonce; with JavaScript off the submit button
+# stays disabled and the <noscript> note explains why.
+_LOGIN_SCRIPT = r"""
+(function(){
+'use strict';
+var form=document.getElementById('login-form'),btn=document.getElementById('login-btn'),
+    out=document.getElementById('altcha'),st=document.getElementById('pow-status');
+if(!form||form.getAttribute('data-disabled')==='1') return;
+st.hidden=false;
+var REFRESH_MS=240000,solvedAt=0,busy=false,pending=false,label=btn.textContent;
+var enc=(typeof TextEncoder!=='undefined')?new TextEncoder():null;
+var subtle=(window.crypto&&window.crypto.subtle&&enc)?window.crypto.subtle:null;
+function say(t,cls){st.textContent=t;st.className='pow'+(cls?' '+cls:'');}
+function hex(buf){var a=new Uint8Array(buf),s='';for(var i=0;i<a.length;i++){s+=(a[i]<16?'0':'')+a[i].toString(16);}return s;}
+// Pure-JS SHA-256 fallback for non-secure contexts (plain http on a LAN IP has no crypto.subtle).
+var sha256js=(function(){
+  var K=[],H0=[],n=2,c=0;
+  function frac(x){return ((x-Math.floor(x))*4294967296)>>>0;}
+  while(c<64){var p=true;for(var f=2;f*f<=n;f++){if(n%f===0){p=false;break;}}
+    if(p){if(c<8)H0[c]=frac(Math.pow(n,1/2));K[c]=frac(Math.pow(n,1/3));c++;}n++;}
+  function rr(x,s){return (x>>>s)|(x<<(32-s));}
+  return function(str){
+    var b=[],i,j;for(i=0;i<str.length;i++)b.push(str.charCodeAt(i)&255);
+    var bl=b.length*8;b.push(128);while(b.length%64!==56)b.push(0);
+    b.push(0,0,0,0,(bl>>>24)&255,(bl>>>16)&255,(bl>>>8)&255,bl&255);
+    var h=H0.slice(),w=new Array(64);
+    for(i=0;i<b.length;i+=64){
+      for(j=0;j<16;j++)w[j]=(b[i+4*j]<<24)|(b[i+4*j+1]<<16)|(b[i+4*j+2]<<8)|b[i+4*j+3];
+      for(j=16;j<64;j++){var s0=rr(w[j-15],7)^rr(w[j-15],18)^(w[j-15]>>>3),
+        s1=rr(w[j-2],17)^rr(w[j-2],19)^(w[j-2]>>>10);w[j]=(w[j-16]+s0+w[j-7]+s1)|0;}
+      var A=h[0],B=h[1],C=h[2],D=h[3],E=h[4],F=h[5],G=h[6],HH=h[7];
+      for(j=0;j<64;j++){
+        var S1=rr(E,6)^rr(E,11)^rr(E,25),ch=(E&F)^(~E&G),t1=(HH+S1+ch+K[j]+w[j])|0,
+            S0=rr(A,2)^rr(A,13)^rr(A,22),mj=(A&B)^(A&C)^(B&C),t2=(S0+mj)|0;
+        HH=G;G=F;F=E;E=(D+t1)|0;D=C;C=B;B=A;A=(t1+t2)|0;}
+      h[0]=(h[0]+A)|0;h[1]=(h[1]+B)|0;h[2]=(h[2]+C)|0;h[3]=(h[3]+D)|0;
+      h[4]=(h[4]+E)|0;h[5]=(h[5]+F)|0;h[6]=(h[6]+G)|0;h[7]=(h[7]+HH)|0;}
+    var o='';for(i=0;i<8;i++){o+=('00000000'+(h[i]>>>0).toString(16)).slice(-8);}return o;
+  };
+})();
+window.__sekishoSha256js=sha256js;
+function digest(s){return subtle?subtle.digest('SHA-256',enc.encode(s)).then(hex):Promise.resolve(sha256js(s));}
+async function solve(ch){
+  var batch=subtle?400:100,max=ch.maxnumber,t0=Date.now(),ui=0;
+  for(var n=0;n<=max;n+=batch){
+    var end=Math.min(n+batch-1,max),jobs=[];
+    for(var i=n;i<=end;i++)jobs.push(digest(ch.salt+i));
+    var res=await Promise.all(jobs),k=res.indexOf(ch.challenge);
+    if(k>=0)return {number:n+k,took:Date.now()-t0};
+    if(Date.now()-ui>120){ui=Date.now();
+      say('Solving the anti-bot puzzle in your browser… '+Math.min(99,Math.floor(end/max*100))+'% searched');}
+  }
+  return null;
+}
+async function run(){
+  if(busy)return;busy=true;btn.disabled=true;btn.textContent='Checking…';out.value='';
+  say('Fetching the anti-bot puzzle…');
+  try{
+    var r=await fetch('/admin/captcha',{credentials:'same-origin',cache:'no-store'});
+    var ch=null;try{ch=await r.json();}catch(e){}
+    if(!r.ok||!ch||ch.algorithm!=='SHA-256')
+      throw new Error((ch&&ch.error&&ch.error.message)||('HTTP '+r.status));
+    var sol=await solve(ch);
+    if(!sol)throw new Error('no solution found');
+    out.value=btoa(JSON.stringify({algorithm:ch.algorithm,challenge:ch.challenge,number:sol.number,
+      salt:ch.salt,signature:ch.signature,took:sol.took}));
+    solvedAt=Date.now();btn.disabled=false;btn.textContent=label;
+    say('Anti-bot check passed in '+(sol.took/1000).toFixed(1)+' s. You can sign in.','ok');
+    if(pending){pending=false;form.submit();}
+  }catch(e){
+    btn.textContent=label;
+    say('Could not complete the anti-bot check ('+e.message+'). Reload the page to try again.','bad');
+  }finally{busy=false;}
+}
+form.addEventListener('submit',function(ev){
+  if(!out.value||Date.now()-solvedAt>REFRESH_MS){ev.preventDefault();pending=true;run();}
+});
+setInterval(function(){if(!busy&&solvedAt&&Date.now()-solvedAt>REFRESH_MS)run();},15000);
+run();
+})();
+"""
+
+LOGIN_HTML = """<!doctype html><html lang="en"><head>__HEAD__<title>Sekisho · 関所</title>
+<style>.pow{font-size:12.5px;color:var(--sumi-soft);min-height:18px;margin:-6px 0 8px;}
+.pow.ok{color:#3f5b28;} .pow.bad{color:var(--shu);}</style></head>
 <body>
-<div class="map-bg">{_map_svg()}</div><div class="vignette"></div>
-{_petals_html()}
+<div class="map-bg">__MAP__</div><div class="vignette"></div>
+__PETALS__
 <div class="login-center">
-  <form class="glass login-card" method="post" action="/admin/login">
+  <form class="glass login-card" method="post" action="/admin/login" id="login-form" data-disabled="<!--DISFLAG-->">
     <div style="font-size:38px;color:var(--shu);font-family:'Shippori Mincho',serif;">関所</div>
     <div class="romaji" style="letter-spacing:3px;color:var(--sumi-soft);font-size:12px;margin-top:4px;">SEKISHO GATEWAY</div>
-    <input type="password" name="password" placeholder="Admin password" autofocus required>
-    <div class="err"><!--ERR--></div>
-    <button class="btn btn-shu" style="width:100%;" type="submit"<!--DISABLED-->>Enter the checkpoint</button>
-    <p class="muted" style="margin-top:16px;">Password is from <code>SEKISHO_ADMIN_PASSWORD</code><!--PWHINT-->.</p>
+    <input type="password" name="password" id="pw" placeholder="Admin password" autocomplete="current-password"
+      aria-label="Admin password" autofocus required>
+    <input type="hidden" name="altcha" id="altcha" value="">
+    <div class="pow" id="pow-status" role="status" aria-live="polite" hidden>Preparing the anti-bot check…</div>
+    <noscript><div class="err">JavaScript is off. Signing in needs it: your browser solves a small
+      proof-of-work puzzle (no third-party service) before the password is checked.
+      Enable JavaScript for this page and reload.</div></noscript>
+    <div class="err" role="alert"><!--ERR--></div>
+    <button class="btn btn-shu" style="width:100%;" type="submit" id="login-btn" disabled>Enter the checkpoint</button>
+    <p class="muted" style="margin-top:16px;">Password is from <code>SEKISHO_ADMIN_PASSWORD</code><!--PWHINT-->.
+      A short proof-of-work check runs in your browser first.</p>
   </form>
 </div>
-</body></html>"""
+<script nonce="__NONCE__">__LOGIN_SCRIPT__</script>
+</body></html>""".replace("__HEAD__", HEAD).replace("__MAP__", _map_svg()).replace(
+    "__PETALS__", _petals_html()).replace("__LOGIN_SCRIPT__", _LOGIN_SCRIPT)
 
 
-def login_html(message: str = "", disabled: bool = False, on_vercel: bool = False) -> str:
-    """Login page. ``message`` is server-controlled text (escaped anyway)."""
+def login_html(message: str = "", disabled: bool = False, on_vercel: bool = False, nonce: str = "") -> str:
+    """Login page. ``message`` is server-controlled text (escaped anyway); ``nonce``
+    authorizes the inline proof-of-work solver under the admin CSP."""
     import html as _html
     page = LOGIN_HTML.replace("<!--ERR-->", _html.escape(message))
-    page = page.replace("<!--DISABLED-->", " disabled" if disabled else "")
+    page = page.replace("<!--DISFLAG-->", "1" if disabled else "0")
     page = page.replace("<!--PWHINT-->", "" if on_vercel else " or printed in the server log")
-    return page
+    return page.replace("__NONCE__", _html.escape(nonce))
 
 
 # ---------------------------------------------------------------------------
@@ -681,6 +778,8 @@ __PETALS__
     <button class="tab" data-tab="backends"><span class="k">脳</span>Backends <span class="badge" id="tab-backends-n">·</span></button>
     <button class="tab" data-tab="requests"><span class="k">暦</span>Requests</button>
     <button class="tab" data-tab="push"><span class="k">鐘</span>Push <span class="badge" id="tab-push-n">·</span></button>
+    <button class="tab" data-tab="busboard"><span class="k">車</span>Bus Board <span class="badge" id="tab-bb-n">·</span></button>
+    <button class="tab" data-tab="riders"><span class="k">印</span>Contributors</button>
   </div>
 
   <!-- ============ STATUS ============ -->
@@ -750,12 +849,27 @@ __PETALS__
   <div class="page" id="page-backends">
     <div class="grid">
       <div class="glass card" style="grid-column:1 / -1;">
+        <h2><span class="seal">鍵</span>NVIDIA API key</h2>
+        <div id="nimkey-status"><span class="muted">Loading…</span></div>
+        <div class="filters" style="margin-top:12px;align-items:center;">
+          <input type="password" id="nimkey-input" autocomplete="off" spellcheck="false" placeholder="nvapi-…"
+            aria-label="New NVIDIA API key" style="min-width:280px;flex:1;">
+          <button class="btn btn-shu btn-sm" id="nimkey-save">Save key</button>
+          <button class="btn btn-ghost btn-sm" id="nimkey-clear">Clear</button>
+          <button class="btn btn-ghost btn-sm" id="nimkey-test">Test</button>
+        </div>
+        <div class="test-out muted" id="nimkey-out"></div>
+        <p class="muted" style="margin-top:8px;">Write-only: the key is encrypted (Fernet, keyed by <code>SEKISHO_SECRETS_KEY</code>)
+          before it is stored and is never shown again, only its last 4 characters. <code>NVIDIA_API_KEY</code> in the
+          environment always wins. <b>Test</b> sends a 1-token ping through the chat slot.</p>
+      </div>
+      <div class="glass card" style="grid-column:1 / -1;">
         <h2><span class="seal">算</span>NVIDIA NIM model slots</h2>
         <div id="nim-status" class="muted">Loading…</div>
         <table style="margin-top:10px;"><thead><tr><th>Task</th><th>Model</th><th>Fallback (tried once)</th><th></th></tr></thead>
           <tbody id="nim-slots"></tbody></table>
         <p class="muted" style="margin-top:10px;">Empty model/fallback = use the env/default value. Fallback <code>none</code> disables it.
-          The API key is read from <code>NVIDIA_API_KEY</code> only — it is never stored or shown here.</p>
+          Slots use the key above (environment or stored), whichever is active.</p>
       </div>
       <div class="glass card" style="grid-column:1 / -1;">
         <h2><span class="seal">脳</span>LLM backends</h2>
@@ -822,6 +936,14 @@ __PETALS__
       <div class="muted" id="push-result" style="margin-top:10px;"></div>
     </div>
   </div>
+
+  <!-- ============ BUS BOARD (server-rendered fragments from /admin/api/busboard) ============ -->
+  <div class="page" id="page-busboard">
+    <div id="bb-overview"><div class="glass card"><span class="muted">Open this tab to contact Bus Board…</span></div></div>
+  </div>
+  <div class="page" id="page-riders">
+    <div id="bb-riders"><div class="glass card"><span class="muted">Open this tab to contact Bus Board…</span></div></div>
+  </div>
 </div>
 
 <script nonce="__NONCE__">
@@ -853,7 +975,44 @@ document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
   if(sc) sc.classList.add('active');
   if(t.dataset.tab==='users') loadUsers();
   if(t.dataset.tab==='backends') loadBackends();
+  if(t.dataset.tab==='busboard'||t.dataset.tab==='riders') loadBusboard(false);
 }));
+function errMsg(r,fallback){return (r&&r.body&&r.body.error&&r.body.error.message)||fallback;}
+// Two-step confirmation for destructive buttons: first click arms, second click acts.
+function twoStep(b,fn){
+  if(b.dataset.armed==='1'){b.dataset.armed='';b.textContent=b.dataset.label;
+    b.classList.remove('btn-shu');b.classList.add('btn-ghost');fn();return;}
+  b.dataset.armed='1';b.dataset.label=b.textContent;b.textContent='Confirm '+b.textContent.toLowerCase()+'?';
+  b.classList.remove('btn-ghost');b.classList.add('btn-shu');
+  setTimeout(()=>{if(b.dataset.armed==='1'){b.dataset.armed='';b.textContent=b.dataset.label;
+    b.classList.remove('btn-shu');b.classList.add('btn-ghost');}},5000);
+}
+let _bbBusy=false;
+async function loadBusboard(force){
+  if(_bbBusy) return; _bbBusy=true;
+  const A=document.getElementById('bb-overview'),B=document.getElementById('bb-riders');
+  if(force||!window._bbLoaded){const w='<div class="glass card"><span class="muted">Contacting Bus Board…</span></div>';
+    if(!window._bbLoaded){A.innerHTML=w;B.innerHTML=w;}}
+  try{
+    const r=await api('/admin/api/busboard'+(force?'?refresh=1':''));
+    if(!r.ok||!r.body||!r.body.panels){A.innerHTML=B.innerHTML='<div class="glass card"><p class="muted">'+
+      esc(errMsg(r,'Could not load the Bus Board section.'))+'</p></div>';return;}
+    A.innerHTML=r.body.panels.busboard;B.innerHTML=r.body.panels.riders;window._bbLoaded=true;
+    document.getElementById('tab-bb-n').textContent=r.body.connected?'on':'off';
+    wireBusboard();
+  }finally{_bbBusy=false;}
+}
+function wireBusboard(){
+  document.querySelectorAll('.bb-refresh').forEach(b=>b.addEventListener('click',()=>loadBusboard(true)));
+  document.querySelectorAll('.bb-snapshot').forEach(b=>b.addEventListener('click',()=>twoStep(b,async()=>{
+    const r=await api('/admin/api/busboard/snapshot',{method:'POST',body:form({confirm:'1'})});
+    toast(r.ok?'Bus Board snapshot taken':errMsg(r,'Snapshot failed'),r.ok);})));
+  document.querySelectorAll('.bb-act').forEach(b=>b.addEventListener('click',()=>twoStep(b,async()=>{
+    const a=b.dataset.action,id=b.dataset.id;
+    const r=await api('/admin/api/busboard/contributors/'+encodeURIComponent(id)+'/'+a,{method:'POST',body:form({confirm:'1'})});
+    toast(r.ok?('Contributor '+(a==='block'?'blocked':'unblocked')):errMsg(r,a+' failed'),r.ok);
+    loadBusboard(true);})));
+}
 
 const slider=document.getElementById('glass-slider'),gval=document.getElementById('glass-val');
 const saved=localStorage.getItem('sekisho_glass_alpha');
@@ -916,7 +1075,7 @@ async function refreshState(){
   if(ip.tailscale.length) lines.push('Tailscale: '+ip.tailscale.map(x=>x+':'+s.port).join('  ·  '));
   if(ip.lan.length) lines.push('LAN: '+ip.lan.map(x=>x+':'+s.port).join('  ·  '));
   if(ip.other.length) lines.push('Other: '+ip.other.map(x=>x+':'+s.port).join('  ·  '));
-  lines.push('Admin: http://'+s.host+':'+s.port+'/admin');
+  lines.push(s.deployment==='vercel'?('Admin: '+s.public_url+'/admin'):('Admin: http://'+s.host+':'+s.port+'/admin'));
   document.getElementById('iplines').innerHTML=lines.map(esc).join('<br>');
   document.getElementById('push-count').textContent=s.push_subscriptions;
   document.getElementById('tab-push-n').textContent=s.push_subscriptions;
@@ -1068,11 +1227,47 @@ document.getElementById('bk-create').addEventListener('click',async()=>{
   if(ok){toast('Backend added',true);['bk-name','bk-model','bk-url','bk-key'].forEach(i=>document.getElementById(i).value='');
     loadBackends();}else{toast((body&&body.error&&body.error.message)||'Failed',false);}
 });
+function renderNimKey(k){
+  const st=document.getElementById('nimkey-status'),inp=document.getElementById('nimkey-input');
+  const save=document.getElementById('nimkey-save'),clr=document.getElementById('nimkey-clear');
+  let h;
+  if(k.source==='env') h='<span class="pill ok"><span class="dot"></span>Set in '+esc(k.env_label)+'</span> <code>'+
+    esc(k.hint)+'</code><p class="muted" style="margin-top:8px;">NVIDIA_API_KEY in the environment takes precedence, '+
+    'so this field is disabled. Change or remove it there and redeploy.</p>';
+  else if(k.source==='admin') h='<span class="pill ok"><span class="dot"></span>Stored encrypted</span> <code>'+esc(k.hint)+'</code>';
+  else if(k.stored_state==='undecryptable') h='<span class="pill mock"><span class="dot"></span>Stored key unreadable</span>'+
+    '<p class="muted" style="margin-top:8px;">SEKISHO_SECRETS_KEY changed since it was saved. Save the key again (or clear it).</p>';
+  else h='<span class="pill mock"><span class="dot"></span>No key</span> <span class="muted">AI features answer 503 until a key is set.</span>';
+  if(!k.storage_available&&!k.env_locked) h+='<p style="margin-top:8px;color:var(--shu);">'+esc(k.storage_message)+'</p>';
+  st.innerHTML=h;
+  const lock=k.env_locked||!k.storage_available;
+  inp.disabled=lock;save.disabled=lock;inp.placeholder=k.env_locked?'managed by the environment':(k.storage_available?
+    (k.source==='admin'?'paste a new key to replace '+(k.hint||''):'nvapi-…'):'storage disabled');
+  clr.disabled=k.env_locked||(k.stored_state==='missing'||k.stored_state==='disabled');
+}
+document.getElementById('nimkey-save').addEventListener('click',async()=>{
+  const inp=document.getElementById('nimkey-input'),v=inp.value.trim();
+  if(!v){toast('Paste a key first',false);return;}
+  const r=await api('/admin/api/nim/key',{method:'POST',body:form({api_key:v})});
+  inp.value='';
+  toast(r.ok?'Key saved (encrypted)':errMsg(r,'Save failed'),r.ok);
+  loadNim();
+});
+document.getElementById('nimkey-clear').addEventListener('click',e=>twoStep(e.currentTarget,async()=>{
+  const r=await api('/admin/api/nim/key/clear',{method:'POST'});
+  toast(r.ok?'Stored key cleared':errMsg(r,'Clear failed'),r.ok);loadNim();}));
+document.getElementById('nimkey-test').addEventListener('click',async()=>{
+  const out=document.getElementById('nimkey-out');out.style.color='';out.textContent='Testing (chat slot)…';
+  const r=await api('/admin/api/nim/test',{method:'POST',body:form({task:'chat'})});
+  if(r.body&&r.body.ok){out.style.color='#3f5b28';out.textContent='ok · '+(r.body.model||'');}
+  else{out.style.color='var(--shu)';out.textContent='FAIL: '+((r.body&&r.body.error)||'unreachable');}
+});
 async function loadNim(){
   const {ok,body}=await api('/admin/api/nim'); if(!ok) return;
+  if(body.key) renderNimKey(body.key);
   const st=document.getElementById('nim-status');
   st.innerHTML='Provider: <b>'+esc(body.provider)+'</b> · '+esc(body.base_url)+' · key: '+
-    (body.key_configured?('set ('+esc(body.key_hint)+')'):'<span style="color:var(--shu)">NVIDIA_API_KEY not set</span>')+
+    (body.key_configured?('set ('+esc(body.key_hint)+')'):'<span style="color:var(--shu)">not set</span>')+
     ' · inline image limit: '+esc(body.max_image_b64)+' base64 chars';
   const tb=document.getElementById('nim-slots');
   tb.innerHTML=Object.values(body.slots).map(sl=>'<tr><td><b>'+esc(sl.task)+'</b><br><span class="muted">'+esc(sl.source)+'</span></td>'+
@@ -1203,7 +1398,7 @@ setInterval(tickQr,1000);
 def _scene_layers() -> str:
     """One fixed background layer per admin tab, each a different province scene.
     The 'status' layer starts active; the tab-switch JS crossfades between them."""
-    order = ["status", "users", "devices", "backends", "requests", "push"]
+    order = ["status", "users", "devices", "backends", "requests", "push", "busboard", "riders"]
     layers = []
     for tab in order:
         active = " active" if tab == "status" else ""
@@ -1223,3 +1418,224 @@ def dashboard_html(nonce: str = "", csrf: str = "") -> str:
         .replace("__NONCE__", nonce)
         .replace("__CSRF__", csrf)
     )
+
+
+# ---------------------------------------------------------------------------
+# Bus Board panels (v7): server-rendered HTML fragments for the two Bus Board
+# tabs. Everything that came from Bus Board is html-escaped here; the dashboard
+# script only drops the fragments in and wires the buttons (no inline handlers).
+# ---------------------------------------------------------------------------
+import html as _h
+
+
+def _num(v, digits: int = 0) -> str:
+    if isinstance(v, bool) or v is None:
+        return "—"
+    if isinstance(v, int):
+        return f"{v:,}"
+    if isinstance(v, float):
+        return f"{v:,.{digits}f}" if digits else f"{v:,.0f}"
+    return _h.escape(str(v))
+
+
+def _txt(v, limit: int = 160) -> str:
+    if v is None or v == "":
+        return "—"
+    s = v if isinstance(v, str) else str(v)
+    return _h.escape(s[:limit])
+
+
+def _dict(v) -> dict:
+    return v if isinstance(v, dict) else {}
+
+
+def _list(v) -> list:
+    return v if isinstance(v, list) else []
+
+
+def _uptime(seconds) -> str:
+    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or seconds < 0:
+        return "—"
+    s = int(seconds)
+    d, s = divmod(s, 86400)
+    hh, s = divmod(s, 3600)
+    m, _ = divmod(s, 60)
+    return (f"{d}d " if d else "") + (f"{hh}h " if d or hh else "") + f"{m}m"
+
+
+def _card(title: str, seal: str, body: str, wide: bool = False) -> str:
+    style = ' style="grid-column:1 / -1;"' if wide else ""
+    return (f'<div class="glass card"{style}><h2><span class="seal">{seal}</span>{title}</h2>'
+            f"{body}</div>")
+
+
+def _kv(rows: list[tuple[str, str]]) -> str:
+    return "<table><tbody>" + "".join(
+        f'<tr><td class="muted">{k}</td><td class="stat" style="text-align:right;">{v}</td></tr>'
+        for k, v in rows) + "</tbody></table>"
+
+
+def _offline_panel(result: dict) -> str:
+    err = _dict(result.get("error"))
+    configured = bool(result.get("configured"))
+    title = "Bus Board unreachable" if configured else "Bus Board not connected"
+    help_txt = ("Sekisho reached out but did not get the stats. Fix the cause below, then Refresh."
+                if configured else
+                "Set <code>BUSBOARD_URL</code> and <code>BUSBOARD_OPS_TOKEN</code> (48+ characters, the same "
+                "value as Bus Board's ops token) in the deployment environment and redeploy. The token "
+                "stays on the server: the browser never sees it.")
+    retry = ('<div style="margin-top:12px;"><button class="btn btn-ghost btn-sm bb-refresh">Refresh</button></div>'
+             if configured else "")
+    return ('<div class="grid">' + _card(
+        title, "車",
+        f'<span class="pill mock"><span class="dot"></span>{_txt(err.get("code") or "offline")}</span>'
+        f'<p class="bb-msg" style="margin-top:12px;">{_txt(err.get("message"), 400)}</p>'
+        f'<p class="muted">{help_txt}</p>{retry}', wide=True) + "</div>")
+
+
+def busboard_panels(result: dict, audit: list[dict] | None = None) -> dict:
+    """{"busboard": html, "riders": html} for a busboard.stats() result."""
+    if not result.get("connected"):
+        off = _offline_panel(result)
+        return {"busboard": off, "riders": off}
+    s = _dict(result.get("stats"))
+    req = _dict(s.get("requests"))
+    sse = _dict(s.get("sse"))
+    vehicles = _dict(s.get("vehicles"))
+    feed = _dict(s.get("feed"))
+    pings = _dict(s.get("pings"))
+    contrib = _dict(s.get("contributors"))
+    runtime = _dict(s.get("runtime"))
+    fetched = ("cached " + str(int(result.get("age_s") or 0)) + " s ago") if result.get("cached") else "just now"
+
+    health = (
+        '<span class="pill ok"><span class="dot"></span>Connected</span>'
+        + _kv([("Version", _txt(s.get("version"))), ("Boot id", f"<code>{_txt(s.get('boot_id'), 40)}</code>"),
+               ("Started", _txt(s.get("started_at"))), ("Uptime", _uptime(s.get("uptime_s"))),
+               ("Fetched", _txt(result.get("fetched_at")) + f' <span class="muted">({fetched})</span>')])
+        + '<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">'
+          '<button class="btn btn-ghost btn-sm bb-refresh">Refresh</button>'
+          '<button class="btn btn-ghost btn-sm bb-snapshot">Snapshot</button></div>'
+          '<p class="muted" style="margin-top:8px;">Snapshot asks Bus Board to persist its state now.</p>')
+
+    by_route_v = sorted(_dict(vehicles.get("by_route")).items(), key=lambda kv: str(kv[0]))
+    live = _kv([("Live streams (SSE) open", _num(sse.get("open"))),
+                ("Streams opened (total)", _num(sse.get("total_opened"))),
+                ("Active vehicles", _num(vehicles.get("active")))])
+    if by_route_v:
+        live += ('<table style="margin-top:10px;"><thead><tr><th>Route</th><th>Vehicles</th></tr></thead><tbody>'
+                 + "".join(f"<tr><td>{_txt(k)}</td><td class=\"stat\">{_num(v)}</td></tr>" for k, v in by_route_v[:40])
+                 + "</tbody></table>")
+
+    feed_html = _kv([("Stops", _num(feed.get("stops"))), ("Unverified stops", _num(feed.get("unverified_stops"))),
+                     ("Routes", _num(feed.get("routes"))), ("Feed version", _txt(feed.get("version")))])
+
+    def _count(kv) -> float:
+        n = _dict(kv[1]).get("count")
+        return float(n) if isinstance(n, (int, float)) and not isinstance(n, bool) else 0.0
+
+    routes = sorted(_dict(req.get("by_route")).items(), key=lambda kv: (-_count(kv), str(kv[0])))
+    if routes:
+        req_html = ("<table><thead><tr><th>Route</th><th>Requests</th><th>4xx</th><th>5xx</th>"
+                    "<th>p50</th><th>p95</th></tr></thead><tbody>" + "".join(
+                        f"<tr><td><code>{_txt(k)}</code></td><td class=\"stat\">{_num(_dict(v).get('count'))}</td>"
+                        f"<td class=\"stat status-4xx\">{_num(_dict(v).get('errors_4xx'))}</td>"
+                        f"<td class=\"stat status-5xx\">{_num(_dict(v).get('errors_5xx'))}</td>"
+                        f"<td class=\"stat muted\">{_num(_dict(v).get('p50_ms'))} ms</td>"
+                        f"<td class=\"stat muted\">{_num(_dict(v).get('p95_ms'))} ms</td></tr>"
+                        for k, v in routes[:60]) + "</tbody></table>")
+    else:
+        req_html = '<p class="muted">No requests recorded since boot.</p>'
+
+    top_j = _list(_dict(s.get("board_queries")).get("top"))
+    if top_j:
+        jour = ("<table><thead><tr><th>From</th><th>To</th><th>Queries</th></tr></thead><tbody>" + "".join(
+            f"<tr><td>{_txt(_dict(j).get('from'))}</td><td>{_txt(_dict(j).get('to'))}</td>"
+            f"<td class=\"stat\">{_num(_dict(j).get('count'))}</td></tr>" for j in top_j[:25]) + "</tbody></table>")
+    else:
+        jour = '<p class="muted">No board queries yet.</p>'
+
+    import json as _json
+    rt_rows = [(_txt(k, 40), _txt(_json.dumps(v) if isinstance(v, (dict, list)) else v, 80))
+               for k, v in list(runtime.items())[:20]]
+    rt_html = _kv(rt_rows) if rt_rows else '<p class="muted">No runtime info.</p>'
+
+    overview = ('<div class="grid">'
+                + _card("Bus Board health", "車", health)
+                + _card("Live streams & vehicles", "灯", live)
+                + _card("Feed", "駅", feed_html)
+                + _card("Runtime", "器", rt_html)
+                + _card("Requests per route", "暦", req_html, wide=True)
+                + _card("Top journeys", "旅", jour, wide=True)
+                + "</div>")
+
+    # ---- riders (pings + contributors) ----
+    rejected = sorted(_dict(pings.get("rejected")).items(),
+                      key=lambda kv: -(kv[1] if isinstance(kv[1], (int, float)) and not isinstance(kv[1], bool) else 0))
+    recv, acc = pings.get("received"), pings.get("accepted")
+    rate = (f"{(acc / recv * 100):.1f}%" if isinstance(recv, (int, float)) and isinstance(acc, (int, float))
+            and recv else "—")
+    ping_html = _kv([("Received", _num(recv)), ("Accepted", _num(acc)), ("Acceptance rate", rate)])
+    if rejected:
+        ping_html += ('<table style="margin-top:10px;"><thead><tr><th>Rejected because</th><th>Pings</th></tr></thead>'
+                      "<tbody>" + "".join(f"<tr><td>{_txt(k)}</td><td class=\"stat\">{_num(v)}</td></tr>"
+                                          for k, v in rejected[:20]) + "</tbody></table>")
+
+    hist = [(str(k), v) for k, v in _dict(contrib.get("trust_histogram")).items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if hist:
+        peak = max(v for _, v in hist) or 1
+        W, H, n = 320, 110, len(hist)
+        bw = W / n
+        bars = "".join(
+            f'<rect x="{i * bw + 3:.1f}" y="{H - 22 - (v / peak) * (H - 34):.1f}" width="{max(4.0, bw - 6):.1f}" '
+            f'height="{max(2.0, (v / peak) * (H - 34)):.1f}" rx="3" fill="var(--sakura-deep)" fill-opacity="0.75"/>'
+            f'<text x="{i * bw + bw / 2:.1f}" y="{H - 8}" font-size="9" text-anchor="middle" fill="#8a857c">{_txt(k, 12)}</text>'
+            f'<text x="{i * bw + bw / 2:.1f}" y="{H - 26 - (v / peak) * (H - 34):.1f}" font-size="9" text-anchor="middle" '
+            f'fill="#55525E">{_num(v)}</text>'
+            for i, (k, v) in enumerate(hist))
+        hist_html = (f'<p class="muted">{_num(contrib.get("count"))} contributors</p>'
+                     f'<svg viewBox="0 0 {W} {H}" width="100%" style="max-width:{W}px;" role="img" '
+                     f'aria-label="Trust score histogram">{bars}</svg>')
+    else:
+        hist_html = f'<p class="muted">{_num(contrib.get("count"))} contributors · no histogram yet.</p>'
+
+    top_c = _list(contrib.get("top"))
+    if top_c:
+        rows = []
+        for cobj in top_c[:50]:
+            cd = _dict(cobj)
+            idh = str(cd.get("id_hash") or "")
+            safe = _h.escape(idh, quote=True)
+            score = cd.get("score")
+            score_s = f"{score:.2f}" if isinstance(score, float) else _num(score)
+            blocked = cd.get("blocked") is True
+            tag = ' <span class="tag off">blocked</span>' if blocked else ""
+            rows.append(
+                f"<tr><td><code>{_txt(idh, 64)}</code>{tag}</td><td class=\"stat\">{score_s}</td>"
+                f"<td class=\"stat\">{_num(cd.get('accepted'))}</td><td style=\"text-align:right;white-space:nowrap;\">"
+                f'<button class="btn btn-ghost btn-sm bb-act" data-action="block" data-id="{safe}">Block</button> '
+                f'<button class="btn btn-ghost btn-sm bb-act" data-action="unblock" data-id="{safe}">Unblock</button>'
+                "</td></tr>")
+        contrib_html = ("<table><thead><tr><th>Contributor (id hash)</th><th>Trust</th><th>Accepted pings</th>"
+                        "<th></th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+                        '<p class="muted" style="margin-top:8px;">Block / Unblock ask for a second click to '
+                        "confirm. Every action is written to the audit trail.</p>")
+    else:
+        contrib_html = '<p class="muted">No contributors yet.</p>'
+
+    if audit:
+        audit_html = ("<table><thead><tr><th>When</th><th>Action</th><th>Target</th><th>Result</th></tr></thead><tbody>"
+                      + "".join(f"<tr><td class=\"muted\">{_txt(a.get('at'), 19)}</td><td>{_txt(a.get('action'))}</td>"
+                                f"<td><code>{_txt(a.get('target'), 64)}</code></td><td>{_txt(a.get('result'))}</td></tr>"
+                                for a in audit[:20]) + "</tbody></table>")
+    else:
+        audit_html = '<p class="muted">No Bus Board actions yet.</p>'
+
+    riders = ('<div class="grid">'
+              + _card("Ping outcomes", "印", ping_html)
+              + _card("Trust histogram", "信", hist_html)
+              + _card("Top contributors", "人", contrib_html, wide=True)
+              + _card("Bus Board audit trail", "記", audit_html, wide=True)
+              + "</div>")
+    return {"busboard": overview, "riders": riders}

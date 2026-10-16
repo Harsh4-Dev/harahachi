@@ -58,6 +58,12 @@ NIM_INLINE_B64_LIMIT = 180_000
 NIM_DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
 CRON_SECRET_MIN_LEN = 32
 OPS_TOKEN_MIN_LEN = 48
+SECRETS_KEY_MIN_LEN = 32
+BUSBOARD_TOKEN_MIN_LEN = 48
+BUSBOARD_MAX_TIMEOUT = 8.0
+# Admin-login proof-of-work: the browser tries on average maxnumber/2 SHA-256
+# hashes. 150k ~= 1-3 s on a laptop with crypto.subtle (measured in Chrome).
+CAPTCHA_DEFAULT_MAXNUMBER = 150_000
 
 
 @dataclass
@@ -95,6 +101,23 @@ class Config:
     # Server-to-server ops API (/api/ops/v1, consumed by the private Bansho
     # console). Unset or shorter than OPS_TOKEN_MIN_LEN => the whole surface 404s.
     ops_token: str = field(default_factory=lambda: os.environ.get("SEKISHO_OPS_TOKEN", "").strip(), repr=False)
+    # Fernet master key for secrets the admin stores in the DB (the NVIDIA key set
+    # from the Backends tab). >= 32 chars; unset => storing secrets is disabled.
+    secrets_key: str = field(default_factory=lambda: os.environ.get("SEKISHO_SECRETS_KEY", "").strip(), repr=False)
+
+    # ---- Bus Board (second phone app) ops API, called server-to-server ----
+    busboard_url: str = field(default_factory=lambda: (os.environ.get("BUSBOARD_URL") or "").strip().rstrip("/"))
+    busboard_token: str = field(default_factory=lambda: os.environ.get("BUSBOARD_OPS_TOKEN", "").strip(),
+                                repr=False)
+    busboard_timeout: float = field(
+        default_factory=lambda: max(0.2, min(BUSBOARD_MAX_TIMEOUT, _env_float("BUSBOARD_TIMEOUT", BUSBOARD_MAX_TIMEOUT)))
+    )
+
+    # ---- admin login captcha (self-hosted proof-of-work, ALTCHA-style) ----
+    captcha_maxnumber: int = field(
+        default_factory=lambda: max(100, min(5_000_000, _env_int("SEKISHO_CAPTCHA_MAXNUMBER",
+                                                                 CAPTCHA_DEFAULT_MAXNUMBER)))
+    )
 
     # IANA timezone that defines "a day" for analytics (DAU, timeseries,
     # retention, the ops summary's "today").
@@ -203,6 +226,37 @@ class Config:
     def ops_enabled(self) -> bool:
         """The ops API exists only with a long (>= 48 chars) SEKISHO_OPS_TOKEN."""
         return len(self.ops_token or "") >= OPS_TOKEN_MIN_LEN
+
+    def secrets_storage_problem(self) -> str | None:
+        """Why admin-managed secrets cannot be stored (encrypted), or None."""
+        if not self.secrets_key:
+            return ("SEKISHO_SECRETS_KEY is not set, so keys cannot be stored encrypted. "
+                    "Set it (32+ random characters) in the environment and redeploy.")
+        if len(self.secrets_key) < SECRETS_KEY_MIN_LEN:
+            return (f"SEKISHO_SECRETS_KEY must be at least {SECRETS_KEY_MIN_LEN} characters; "
+                    "storing keys is disabled until it is.")
+        return None
+
+    def busboard_problem(self) -> str | None:
+        """Why the Bus Board section cannot connect (shown in the admin), or None."""
+        if not self.busboard_url:
+            return "BUSBOARD_URL is not set."
+        if not self.busboard_token:
+            return "BUSBOARD_OPS_TOKEN is not set."
+        if len(self.busboard_token) < BUSBOARD_TOKEN_MIN_LEN:
+            return f"BUSBOARD_OPS_TOKEN must be at least {BUSBOARD_TOKEN_MIN_LEN} characters."
+        from urllib.parse import urlsplit
+        try:
+            p = urlsplit(self.busboard_url)
+        except ValueError:
+            return "BUSBOARD_URL is not a valid URL."
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return "BUSBOARD_URL must be an http(s) URL."
+        if p.username or p.password:
+            return "BUSBOARD_URL must not contain credentials."
+        if self.on_vercel and p.scheme != "https":
+            return "BUSBOARD_URL must use https on a public deployment (the token travels with every call)."
+        return None
 
     def provider_mode(self) -> str:
         if self.provider in ("nim", "registry"):
