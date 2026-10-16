@@ -1,10 +1,8 @@
 # Files Vercel should never upload/build/bundle (see DEPLOY_VERCEL.md).
-# Android native project + local build outputs (Vercel builds app/dist itself)
-app/android
-app/dist
-app/dev-dist
+# The phone app is not hosted: Vercel serves only the Sekisho server
+# (api/index.py) and public/robots.txt. The app ships inside the APK.
+app/
 node_modules
-app/node_modules
 **/*.tsbuildinfo
 
 # Python virtualenvs / caches

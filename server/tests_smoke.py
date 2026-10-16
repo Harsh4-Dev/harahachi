@@ -1523,12 +1523,23 @@ check("v4 root requirements.txt (Vercel) pins == server/requirements.txt (minus 
       _srv == _rootp, str({k: (_srv.get(k), _rootp.get(k)) for k in set(_srv) | set(_rootp) if _srv.get(k) != _rootp.get(k)}))
 _vj = _json4.loads((_root / "vercel.json").read_text(encoding="utf-8"))
 _fn = _vj.get("functions", {}).get("api/index.py", {})
-_csp_static = next((h["value"] for blk in _vj.get("headers", []) for h in blk["headers"]
-                    if h["key"] == "Content-Security-Policy"), "")
-check("v4 vercel.json: maxDuration 300 (Hobby max), daily cron -> /api/cron/tick, static CSP",
-      _fn.get("maxDuration") == 300 and any(c["path"] == "/api/cron/tick" for c in _vj.get("crons", []))
-      and "worker-src 'self' blob:" in _csp_static and "connect-src 'self'" in _csp_static
-      and "fonts.gstatic.com" in _csp_static, str(_fn))
+check("v4 vercel.json: maxDuration 300 (Hobby max), daily cron -> /api/cron/tick",
+      _fn.get("maxDuration") == 300 and any(c["path"] == "/api/cron/tick" for c in _vj.get("crons", [])),
+      str(_fn))
+# Server only: the phone app ships in the APK and is never hosted. Vercel must
+# build nothing from app/, serve only public/ (robots.txt), and send every other
+# path to the function - with no output dir it would serve the repo as static files.
+_robots = (_root / "public" / "robots.txt")
+check("v7 vercel.json: server only - no app build, output public/, no SPA fallback, app/ not uploaded",
+      _vj.get("outputDirectory") == "public"
+      and not any(s in (_vj.get(k) or "") for k in ("buildCommand", "installCommand")
+                  for s in ("npm", "--prefix app", "vite"))
+      and not any(rw["destination"] == "/index.html" for rw in _vj.get("rewrites", []))
+      and _vj["rewrites"][-1] == {"source": "/(.*)", "destination": "/api/index"}
+      and "app/" in (_root / ".vercelignore").read_text(encoding="utf-8").split()
+      and _robots.is_file() and "Disallow: /" in _robots.read_text(encoding="utf-8")
+      and sorted(p.name for p in (_root / "public").iterdir()) == ["robots.txt"],
+      f"out={_vj.get('outputDirectory')} last_rewrite={_vj['rewrites'][-1]}")
 
 
 
@@ -2150,17 +2161,25 @@ def _():
 
 
 # ---------------------------------------------------------------- L3 -------
-@_audit("audit L3: vercel headers regex")
+@_audit("audit L3: vercel routing")
 def _():
-    src = next(blk["source"] for blk in _vj["headers"]
-               if any(h["key"] == "Content-Security-Policy" for h in blk["headers"]))
-    rx = _re4.compile("^" + src + "$")
-    want = {"/": True, "/index.html": True, "/adminx": True, "/administrator.html": True, "/apix": True,
-            "/assets/a.js": True, "/admin": False, "/admin/": False, "/admin/api/state": False,
-            "/api": False, "/api/v1/health": False, "/pair/x": False, "/llm/v1/models": False}
-    got = {p: bool(rx.match(p)) for p in want}
-    check("audit L3: static-header rule covers /adminx etc., excludes only /admin and /admin/...",
-          got == want, str({p: g for p, g in got.items() if g != want[p]}))
+    # L3 was a static-site header gap (/adminx served the app without headers).
+    # With no static app, the gap cannot exist: every path but robots.txt reaches
+    # the function, which sets its own security headers (see the API header checks).
+    def first(path):
+        for rw in _vj["rewrites"]:
+            if _re4.match("^" + rw["source"] + "$", path):
+                return rw["destination"]
+        return None
+    paths = ["/", "/index.html", "/adminx", "/administrator.html", "/apix", "/assets/a.js",
+             "/admin", "/admin/", "/admin/api/state", "/api", "/api/v1/health", "/pair/x", "/llm/v1/models"]
+    missed = [p for p in paths if first(p) != "/api/index"]
+    check("audit L3: every path (incl. /adminx, /, /index.html) reaches the function - no static app",
+          not missed, str(missed))
+    r = client.get("/adminx")
+    check("audit L3: unknown paths answer the API 404 with security headers",
+          r.status_code == 404 and "nosniff" in r.headers.get("x-content-type-options", ""),
+          f"{r.status_code} {dict(r.headers)}")
 
 
 # ---------------------------------------------------------------- L4 -------
@@ -2393,19 +2412,16 @@ def _():
             for k, v in want.items() if v not in resp.headers.get(k, "")]
     check("v6 ops: API security headers on ops responses (404 + 200)", not miss, str(miss))
 
-    # vercel.json: /api/ops/* reaches the function via the existing /api/(.*) rewrite,
-    # and is NOT covered by the static-site header rule (FastAPI sets its headers).
+    # vercel.json: /api/ops/* reaches the function via the /api/(.*) rewrite
+    # (FastAPI sets its headers; no static-site header rule exists any more).
     def _first_rewrite(path):
         for rw in _vj["rewrites"]:
             if _re4.match("^" + rw["source"] + "$", path):
                 return rw["destination"]
         return None
-    static_src = next(blk["source"] for blk in _vj["headers"]
-                      if any(h["key"] == "Content-Security-Policy" for h in blk["headers"]))
     check("v6 vercel.json: /api/ops/v1/* routes through the /api/(.*) rewrite to the function",
           all(_first_rewrite(p) == "/api/index" for p in ("/api/ops/v1/summary", "/api/ops/v1/users/3",
-                                                          "/api/ops/v1/actions"))
-          and not _re4.match("^" + static_src + "$", "/api/ops/v1/summary"),
+                                                          "/api/ops/v1/actions")),
           str(_first_rewrite("/api/ops/v1/summary")))
 
 
