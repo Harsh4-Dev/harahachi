@@ -30,3 +30,6 @@ app/android/.idea/
 .DS_Store
 Thumbs.db
 *.zip
+
+# vercel cli link (project ids, local only)
+.vercel/
