@@ -1,5 +1,5 @@
 // Account screen (accounts v2, DESIGN.md 6.6): tegata-scroll styled. Two modes:
-//  • create — username + 4-8 digit PIN on a glass numpad, sealed by the hanko
+//  • create — username (3+ chars) + 6-8 digit PIN on a glass numpad, sealed by the hanko
 //    stamp → POST /auth/register (profile carried from onboarding draft). Shown
 //    right after pairing for a first-time traveler.
 //  • login — username + PIN pad + "new traveler" link → create. Shown when the
@@ -37,8 +37,10 @@ export function Account() {
   const [stamped, setStamped] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const pinOk = pin.length >= 4 && pin.length <= 8;
-  const userOk = username.trim().length >= 2;
+  // Must match the server (models.RegisterIn / LoginIn): PIN 6-8 digits,
+  // username 3-32 characters. A shorter PIN is rejected with a 422.
+  const pinOk = pin.length >= 6 && pin.length <= 8;
+  const userOk = username.trim().length >= 3 && username.trim().length <= 32;
   const canSubmit = pinOk && userOk && !busy;
 
   const pressDigit = (d: string) => {
@@ -75,6 +77,8 @@ export function Account() {
         setErr('Wrong username or PIN.');
       } else if (e instanceof ApiError && (e.code === 'username_taken' || e.status === 409)) {
         setErr('That username is taken — pick another.');
+      } else if (e instanceof ApiError && e.status === 422) {
+        setErr('Use a name of at least 3 characters and a PIN of 6 to 8 digits.');
       } else {
         setErr(mode === 'create' ? 'Could not create the account.' : 'Could not sign in.');
       }
@@ -95,7 +99,7 @@ export function Account() {
             </h1>
             <p className="muted">
               {mode === 'create'
-                ? 'Choose a name and a 4–8 digit PIN. The hanko stamp seals your permit.'
+                ? 'Choose a name (3+ characters) and a 6–8 digit PIN. The hanko stamp seals your permit.'
                 : 'Sign in with your username and PIN to pick up your journey.'}
             </p>
 
